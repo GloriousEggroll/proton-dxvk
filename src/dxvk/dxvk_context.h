@@ -6,6 +6,8 @@
 #include "dxvk_context_state.h"
 #include "dxvk_data.h"
 #include "dxvk_event.h"
+#include "dxvk_gpu_event.h"
+#include "dxvk_gpu_query.h"
 #include "dxvk_meta_clear.h"
 #include "dxvk_meta_copy.h"
 #include "dxvk_meta_mipgen.h"
@@ -13,9 +15,6 @@
 #include "dxvk_meta_resolve.h"
 #include "dxvk_pipecache.h"
 #include "dxvk_pipemanager.h"
-#include "dxvk_query.h"
-#include "dxvk_query_manager.h"
-#include "dxvk_query_pool.h"
 #include "dxvk_util.h"
 
 namespace dxvk {
@@ -34,11 +33,12 @@ namespace dxvk {
     DxvkContext(
       const Rc<DxvkDevice>&             device,
       const Rc<DxvkPipelineManager>&    pipelineManager,
+      const Rc<DxvkGpuEventPool>&       gpuEventPool,
+      const Rc<DxvkGpuQueryPool>&       gpuQueryPool,
       const Rc<DxvkMetaClearObjects>&   metaClearObjects,
       const Rc<DxvkMetaCopyObjects>&    metaCopyObjects,
       const Rc<DxvkMetaMipGenObjects>&  metaMipGenObjects,
-      const Rc<DxvkMetaPackObjects>&    metaPackObjects,
-      const Rc<DxvkMetaResolveObjects>& metaResolveObjects);
+      const Rc<DxvkMetaPackObjects>&    metaPackObjects);
     ~DxvkContext();
     
     /**
@@ -78,14 +78,14 @@ namespace dxvk {
      * \param [in] query The query to end
      */
     void beginQuery(
-      const DxvkQueryRevision&  query);
+      const Rc<DxvkGpuQuery>&   query);
     
     /**
      * \brief Ends generating query data
      * \param [in] query The query to end
      */
     void endQuery(
-      const DxvkQueryRevision&  query);
+      const Rc<DxvkGpuQuery>&   query);
     
     /**
      * \brief Sets render targets
@@ -772,21 +772,28 @@ namespace dxvk {
       const DxvkEventRevision&  event);
     
     /**
+     * \brief Signals a GPU event
+     * \param [in] event The event
+     */
+    void signalGpuEvent(
+      const Rc<DxvkGpuEvent>&   event);
+    
+    /**
      * \brief Writes to a timestamp query
      * \param [in] query The timestamp query
      */
     void writeTimestamp(
-      const DxvkQueryRevision&  query);
+      const Rc<DxvkGpuQuery>&   query);
     
   private:
     
     const Rc<DxvkDevice>              m_device;
     const Rc<DxvkPipelineManager>     m_pipeMgr;
+    const Rc<DxvkGpuEventPool>        m_gpuEvents;
     const Rc<DxvkMetaClearObjects>    m_metaClear;
     const Rc<DxvkMetaCopyObjects>     m_metaCopy;
     const Rc<DxvkMetaMipGenObjects>   m_metaMipGen;
     const Rc<DxvkMetaPackObjects>     m_metaPack;
-    const Rc<DxvkMetaResolveObjects>  m_metaResolve;
     
     Rc<DxvkCommandList>     m_cmd;
     Rc<DxvkDescriptorPool>  m_descPool;
@@ -798,8 +805,8 @@ namespace dxvk {
     DxvkBarrierSet          m_transitions;
     DxvkBarrierControlFlags m_barrierControl;
     
-    DxvkQueryManager        m_queries;
-
+    DxvkGpuQueryManager     m_queryManager;
+    
     VkPipeline m_gpActivePipeline = VK_NULL_HANDLE;
     VkPipeline m_cpActivePipeline = VK_NULL_HANDLE;
 

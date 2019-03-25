@@ -249,13 +249,10 @@ namespace dxvk {
       return;
     
     Com<D3D11Query> queryPtr = static_cast<D3D11Query*>(pAsync);
-      
-    if (queryPtr->HasBeginEnabled()) {
-      uint32_t revision = queryPtr->Reset();
-      EmitCs([revision, queryPtr] (DxvkContext* ctx) {
-        queryPtr->Begin(ctx, revision);
-      });
-    }
+
+    EmitCs([queryPtr] (DxvkContext* ctx) {
+      queryPtr->Begin(ctx);
+    });
   }
   
   
@@ -267,16 +264,9 @@ namespace dxvk {
     
     Com<D3D11Query> queryPtr = static_cast<D3D11Query*>(pAsync);
     
-    if (queryPtr->HasBeginEnabled()) {
-      EmitCs([queryPtr] (DxvkContext* ctx) {
-        queryPtr->End(ctx);
-      });
-    } else {
-      uint32_t revision = queryPtr->Reset();
-      EmitCs([revision, queryPtr] (DxvkContext* ctx) {
-        queryPtr->Signal(ctx, revision);
-      });
-    }
+    EmitCs([queryPtr] (DxvkContext* ctx) {
+      queryPtr->End(ctx);
+    });
   }
   
   
@@ -1137,8 +1127,10 @@ namespace dxvk {
         textureInfo->GetSubresourceFromIndex(
           VK_IMAGE_ASPECT_COLOR_BIT, DstSubresource);
       
+      VkExtent3D mipExtent = textureInfo->GetImage()->mipLevelExtent(subresource.mipLevel);
+
       VkOffset3D offset = { 0, 0, 0 };
-      VkExtent3D extent = textureInfo->GetImage()->mipLevelExtent(subresource.mipLevel);
+      VkExtent3D extent = mipExtent;
       
       if (pDstBox != nullptr) {
         if (pDstBox->left >= pDstBox->right
@@ -1163,6 +1155,10 @@ namespace dxvk {
       auto formatInfo = imageFormatInfo(
         textureInfo->GetImage()->info().format);
       
+      if (!util::isBlockAligned(offset, formatInfo->blockSize)
+       || !util::isBlockAligned(offset, extent, formatInfo->blockSize, mipExtent))
+        return;
+
       const VkExtent3D regionExtent = util::computeBlockCount(extent, formatInfo->blockSize);
       
       const VkDeviceSize bytesPerRow   = regionExtent.width  * formatInfo->elementSize;

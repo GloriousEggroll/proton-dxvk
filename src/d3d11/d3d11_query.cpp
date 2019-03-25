@@ -8,33 +8,35 @@ namespace dxvk {
     const D3D11_QUERY_DESC& desc)
   : m_device(device), m_desc(desc),
     m_d3d10(this, device->GetD3D10Interface()) {
+    Rc<DxvkDevice> dxvkDevice = m_device->GetDXVKDevice();
+
     switch (m_desc.Query) {
       case D3D11_QUERY_EVENT:
-        m_event = new DxvkEvent();
+        m_event = dxvkDevice->createGpuEvent();
         break;
         
       case D3D11_QUERY_OCCLUSION:
-        m_query = new DxvkQuery(
+        m_query = dxvkDevice->createGpuQuery(
           VK_QUERY_TYPE_OCCLUSION,
-          VK_QUERY_CONTROL_PRECISE_BIT);
+          VK_QUERY_CONTROL_PRECISE_BIT, 0);
         break;
       
       case D3D11_QUERY_OCCLUSION_PREDICATE:
-        m_query = new DxvkQuery(
-          VK_QUERY_TYPE_OCCLUSION, 0);
+        m_query = dxvkDevice->createGpuQuery(
+          VK_QUERY_TYPE_OCCLUSION, 0, 0);
         break;
         
       case D3D11_QUERY_TIMESTAMP:
-        m_query = new DxvkQuery(
-          VK_QUERY_TYPE_TIMESTAMP, 0);
+        m_query = dxvkDevice->createGpuQuery(
+          VK_QUERY_TYPE_TIMESTAMP, 0, 0);
         break;
       
       case D3D11_QUERY_TIMESTAMP_DISJOINT:
         break;
       
       case D3D11_QUERY_PIPELINE_STATISTICS:
-        m_query = new DxvkQuery(
-          VK_QUERY_TYPE_PIPELINE_STATISTICS, 0);
+        m_query = dxvkDevice->createGpuQuery(
+          VK_QUERY_TYPE_PIPELINE_STATISTICS, 0, 0);
         break;
       
       case D3D11_QUERY_SO_STATISTICS:
@@ -44,25 +46,25 @@ namespace dxvk {
         // FIXME it is technically incorrect to map
         // SO_OVERFLOW_PREDICATE to the first stream,
         // but this is good enough for D3D10 behaviour
-        m_query = new DxvkQuery(
+        m_query = dxvkDevice->createGpuQuery(
           VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT, 0, 0);
         break;
       
       case D3D11_QUERY_SO_STATISTICS_STREAM1:
       case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1:
-        m_query = new DxvkQuery(
+        m_query = dxvkDevice->createGpuQuery(
           VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT, 0, 1);
         break;
       
       case D3D11_QUERY_SO_STATISTICS_STREAM2:
       case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2:
-        m_query = new DxvkQuery(
+        m_query = dxvkDevice->createGpuQuery(
           VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT, 0, 2);
         break;
       
       case D3D11_QUERY_SO_STATISTICS_STREAM3:
       case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3:
-        m_query = new DxvkQuery(
+        m_query = dxvkDevice->createGpuQuery(
           VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT, 0, 3);
         break;
       
@@ -167,55 +169,34 @@ namespace dxvk {
   }
   
   
-  uint32_t D3D11Query::Reset() {
-    if (m_query != nullptr)
-      return m_query->reset();
-    
-    if (m_event != nullptr)
-      return m_event->reset();
-    
-    return 0;
-  }
-  
-  
-  bool D3D11Query::HasBeginEnabled() const {
-    return m_desc.Query != D3D11_QUERY_EVENT
-        && m_desc.Query != D3D11_QUERY_TIMESTAMP;
-  }
-  
-  
-  void D3D11Query::Begin(DxvkContext* ctx, uint32_t revision) {
-    m_revision = revision;
-    
-    if (m_query != nullptr) {
-      DxvkQueryRevision rev = { m_query, revision };
-      ctx->beginQuery(rev);
+  void D3D11Query::Begin(DxvkContext* ctx) {
+    switch (m_desc.Query) {
+      case D3D11_QUERY_EVENT:
+      case D3D11_QUERY_TIMESTAMP:
+      case D3D11_QUERY_TIMESTAMP_DISJOINT:
+        break;
+      
+      default:
+        ctx->beginQuery(m_query);
     }
   }
   
   
   void D3D11Query::End(DxvkContext* ctx) {
-    if (m_query != nullptr) {
-      DxvkQueryRevision rev = { m_query, m_revision };
-      ctx->endQuery(rev);
-    }
-  }
-  
-  
-  void D3D11Query::Signal(DxvkContext* ctx, uint32_t revision) {
     switch (m_desc.Query) {
-      case D3D11_QUERY_EVENT: {
-        DxvkEventRevision rev = { m_event, revision };
-        ctx->signalEvent(rev);
-      } break;
+      case D3D11_QUERY_EVENT:
+        ctx->signalGpuEvent(m_event);
+        break;
       
-      case D3D11_QUERY_TIMESTAMP: {
-        DxvkQueryRevision rev = { m_query, revision };
-        ctx->writeTimestamp(rev);
-      } break;
+      case D3D11_QUERY_TIMESTAMP:
+        ctx->writeTimestamp(m_query);
+        break;
+      
+      case D3D11_QUERY_TIMESTAMP_DISJOINT:
+        break;
       
       default:
-        break;
+        ctx->endQuery(m_query);
     }
   }
   
@@ -224,8 +205,13 @@ namespace dxvk {
           void*                             pData,
           UINT                              GetDataFlags) {
     if (m_desc.Query == D3D11_QUERY_EVENT) {
-      const bool signaled = m_event->getStatus() == DxvkEventStatus::Signaled;
+      DxvkGpuEventStatus status = m_event->test();
+
+      if (status == DxvkGpuEventStatus::Invalid)
+        return DXGI_ERROR_INVALID_CALL;
       
+      bool signaled = status == DxvkGpuEventStatus::Signaled;
+
       if (pData != nullptr)
         *static_cast<BOOL*>(pData) = signaled;
       
@@ -234,12 +220,13 @@ namespace dxvk {
       DxvkQueryData queryData = {};
       
       if (m_query != nullptr) {
-        DxvkQueryStatus status = m_query->getData(queryData);
+        DxvkGpuQueryStatus status = m_query->getData(queryData);
 
-        if (status == DxvkQueryStatus::Created)
+        if (status == DxvkGpuQueryStatus::Invalid
+         || status == DxvkGpuQueryStatus::Failed)
           return DXGI_ERROR_INVALID_CALL;
         
-        if (status != DxvkQueryStatus::Available)
+        if (status == DxvkGpuQueryStatus::Pending)
           return S_FALSE;
       }
       

@@ -120,6 +120,8 @@ namespace dxvk {
     bool                    m_dirty = true;
     bool                    m_vsync = true;
 
+    bool                    m_usePresentFence = true;
+
     void PresentImage(UINT SyncInterval);
 
     void FlushImmediateContext();
@@ -136,6 +138,8 @@ namespace dxvk {
     void CreateGammaTexture(
             UINT                NumControlPoints,
       const D3D11_VK_GAMMA_CP*  pControlPoints);
+    
+    void DestroyGammaTexture();
     
     void CreateHud();
 

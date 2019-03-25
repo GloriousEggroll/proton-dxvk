@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "dxgi_adapter.h"
+#include "dxgi_monitor.h"
 #include "dxgi_options.h"
 
 #include "../dxvk/dxvk_instance.h"
@@ -115,10 +116,15 @@ namespace dxvk {
     const DxgiOptions* GetOptions() const {
       return &m_options;
     }
+
+    DxgiMonitorInfo* GetMonitorInfo() {
+      return &m_monitorInfo;
+    }
     
   private:
     
     Rc<DxvkInstance> m_instance;
+    DxgiMonitorInfo  m_monitorInfo;
     DxgiOptions      m_options;
     UINT             m_flags;
     

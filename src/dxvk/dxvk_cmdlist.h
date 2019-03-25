@@ -6,10 +6,11 @@
 #include "dxvk_buffer.h"
 #include "dxvk_descriptor.h"
 #include "dxvk_event.h"
+#include "dxvk_gpu_event.h"
+#include "dxvk_gpu_query.h"
 #include "dxvk_lifetime.h"
 #include "dxvk_limits.h"
 #include "dxvk_pipelayout.h"
-#include "dxvk_query_tracker.h"
 #include "dxvk_staging.h"
 #include "dxvk_stats.h"
 
@@ -135,18 +136,6 @@ namespace dxvk {
     }
     
     /**
-     * \brief Adds a query range to track
-     * 
-     * Query data will be retrieved and written back to
-     * the query objects after the command buffer has
-     * finished executing on the GPU.
-     * \param [in] queries The query range
-     */
-    void trackQueryRange(DxvkQueryRange&& queries) {
-      m_queryTracker.trackQueryRange(std::move(queries));
-    }
-    
-    /**
      * \brief Adds an event revision to track
      * 
      * The event will be signaled after the command
@@ -165,6 +154,28 @@ namespace dxvk {
     }
     
     /**
+     * \brief Tracks a GPU event
+     * 
+     * The event will be returned to its event pool
+     * after the command buffer has finished executing.
+     * \param [in] handle Event handle
+     */
+    void trackGpuEvent(DxvkGpuEventHandle handle) {
+      m_gpuEventTracker.trackEvent(handle);
+    }
+    
+    /**
+     * \brief Tracks a GPU query
+     * 
+     * The query handle will be returned to its allocator
+     * after the command buffer has finished executing.
+     * \param [in] handle Event handle
+     */
+    void trackGpuQuery(DxvkGpuQueryHandle handle) {
+      m_gpuQueryTracker.trackQuery(handle);
+    }
+    
+    /**
      * \brief Signals tracked events
      * 
      * Marks all tracked events as signaled. Call this after
@@ -172,17 +183,6 @@ namespace dxvk {
      */
     void signalEvents() {
       m_eventTracker.signalEvents();
-    }
-    
-    /**
-     * \brief Writes back query results
-     * 
-     * Writes back query data to all queries tracked by the
-     * query range tracker. Call this after synchronizing
-     * with a fence for this command list.
-     */
-    void writeQueryData() {
-      m_queryTracker.writeQueryData();
     }
     
     /**
@@ -540,6 +540,28 @@ namespace dxvk {
       m_vkd->vkCmdPushConstants(m_execBuffer,
         layout, stageFlags, offset, size, pValues);
     }
+
+
+    void cmdResetQuery(
+            VkQueryPool             queryPool,
+            uint32_t                queryId,
+            VkEvent                 event) {
+      if (event == VK_NULL_HANDLE) {
+        m_vkd->vkResetQueryPoolEXT(
+          m_vkd->device(), queryPool, queryId, 1);
+      } else {
+        m_cmdBuffersUsed.set(DxvkCmdBufferFlag::InitBuffer);
+
+        m_vkd->vkResetEvent(
+          m_vkd->device(), event);
+        
+        m_vkd->vkCmdResetQueryPool(
+          m_initBuffer, queryPool, queryId, 1);
+        
+        m_vkd->vkCmdSetEvent(m_initBuffer,
+          event, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+      }
+    }
     
     
     void cmdResetQueryPool(
@@ -590,6 +612,13 @@ namespace dxvk {
         depthBiasConstantFactor,
         depthBiasClamp,
         depthBiasSlopeFactor);
+    }
+
+
+    void cmdSetEvent(
+            VkEvent                 event,
+            VkPipelineStageFlags    stages) {
+      m_vkd->vkCmdSetEvent(m_execBuffer, event, stages);
     }
 
     
@@ -659,8 +688,9 @@ namespace dxvk {
     DxvkLifetimeTracker m_resources;
     DxvkDescriptorPoolTracker m_descriptorPoolTracker;
     DxvkStagingAlloc    m_stagingAlloc;
-    DxvkQueryTracker    m_queryTracker;
     DxvkEventTracker    m_eventTracker;
+    DxvkGpuEventTracker m_gpuEventTracker;
+    DxvkGpuQueryTracker m_gpuQueryTracker;
     DxvkBufferTracker   m_bufferTracker;
     DxvkStatCounters    m_statCounters;
     

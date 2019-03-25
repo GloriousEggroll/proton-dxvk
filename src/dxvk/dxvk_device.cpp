@@ -19,11 +19,12 @@ namespace dxvk {
     m_memory            (new DxvkMemoryAllocator    (this)),
     m_renderPassPool    (new DxvkRenderPassPool     (vkd)),
     m_pipelineManager   (new DxvkPipelineManager    (this, m_renderPassPool.ptr())),
+    m_gpuEventPool      (new DxvkGpuEventPool       (vkd)),
+    m_gpuQueryPool      (new DxvkGpuQueryPool       (this)),
     m_metaClearObjects  (new DxvkMetaClearObjects   (vkd)),
     m_metaCopyObjects   (new DxvkMetaCopyObjects    (vkd)),
     m_metaMipGenObjects (new DxvkMetaMipGenObjects  (vkd)),
     m_metaPackObjects   (new DxvkMetaPackObjects    (vkd)),
-    m_metaResolveObjects(new DxvkMetaResolveObjects (vkd)),
     m_unboundResources  (this),
     m_submissionQueue   (this) {
     m_graphicsQueue.queueFamily = m_adapter->graphicsQueueFamily();
@@ -43,6 +44,23 @@ namespace dxvk {
     // Wait for all pending Vulkan commands to be
     // executed before we destroy any resources.
     m_vkd->vkDeviceWaitIdle(m_vkd->device());
+  }
+
+
+  VkPipelineStageFlags DxvkDevice::getShaderPipelineStages() const {
+    VkPipelineStageFlags result = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                                | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT
+                                | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    
+    if (m_features.core.features.geometryShader)
+      result |= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
+    
+    if (m_features.core.features.tessellationShader) {
+      result |= VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT
+             |  VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT;
+    }
+
+    return result;
   }
 
 
@@ -123,11 +141,25 @@ namespace dxvk {
   Rc<DxvkContext> DxvkDevice::createContext() {
     return new DxvkContext(this,
       m_pipelineManager,
+      m_gpuEventPool,
+      m_gpuQueryPool,
       m_metaClearObjects,
       m_metaCopyObjects,
       m_metaMipGenObjects,
-      m_metaPackObjects,
-      m_metaResolveObjects);
+      m_metaPackObjects);
+  }
+
+
+  Rc<DxvkGpuEvent> DxvkDevice::createGpuEvent() {
+    return new DxvkGpuEvent(m_vkd);
+  }
+
+
+  Rc<DxvkGpuQuery> DxvkDevice::createGpuQuery(
+          VkQueryType           type,
+          VkQueryControlFlags   flags,
+          uint32_t              index) {
+    return new DxvkGpuQuery(m_vkd, type, flags, index);
   }
   
   

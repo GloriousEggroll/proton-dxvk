@@ -94,6 +94,10 @@ namespace dxvk {
     { "re7.exe", {{
       { "d3d11.relaxedBarriers",            "True" },
     }} },
+    /* Devil May Cry 5                            */
+    { "DevilMayCry5.exe", {{
+      { "d3d11.relaxedBarriers",            "True" },
+    }} },
     /* Call of Duty WW2                           */
     { "s2_sp64_ship.exe", {{
       { "dxgi.nvapiHack",                   "False" },
@@ -104,6 +108,14 @@ namespace dxvk {
     }} },
     /* Mass Effect Andromeda                      */
     { "MassEffectAndromeda.exe", {{
+      { "dxgi.nvapiHack",                   "False" },
+    }} },
+    /* Star Wars Battlefront (2015)               */
+    { "starwarsbattlefront.exe", {{
+      { "dxgi.nvapiHack",                   "False" },
+    }} },
+    /* Star Wars Battlefront (2015) Trial         */
+    { "starwarsbattlefronttrial.exe", {{
       { "dxgi.nvapiHack",                   "False" },
     }} },
   }};

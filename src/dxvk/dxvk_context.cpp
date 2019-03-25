@@ -9,20 +9,23 @@ namespace dxvk {
   DxvkContext::DxvkContext(
     const Rc<DxvkDevice>&             device,
     const Rc<DxvkPipelineManager>&    pipelineManager,
+    const Rc<DxvkGpuEventPool>&       gpuEventPool,
+    const Rc<DxvkGpuQueryPool>&       gpuQueryPool,
     const Rc<DxvkMetaClearObjects>&   metaClearObjects,
     const Rc<DxvkMetaCopyObjects>&    metaCopyObjects,
     const Rc<DxvkMetaMipGenObjects>&  metaMipGenObjects,
-    const Rc<DxvkMetaPackObjects>&    metaPackObjects,
-    const Rc<DxvkMetaResolveObjects>& metaResolveObjects)
+    const Rc<DxvkMetaPackObjects>&    metaPackObjects)
   : m_device      (device),
     m_pipeMgr     (pipelineManager),
+    m_gpuEvents   (gpuEventPool),
     m_metaClear   (metaClearObjects),
     m_metaCopy    (metaCopyObjects),
     m_metaMipGen  (metaMipGenObjects),
     m_metaPack    (metaPackObjects),
-    m_metaResolve (metaResolveObjects),
-    m_queries     (device->vkd()) { }
-  
+    m_queryManager(gpuQueryPool) {
+
+  }
+    
   
   DxvkContext::~DxvkContext() {
     
@@ -62,8 +65,6 @@ namespace dxvk {
   Rc<DxvkCommandList> DxvkContext::endRecording() {
     this->spillRenderPass();
     
-    m_queries.trackQueryPools(m_cmd);
-
     m_barriers.recordCommands(m_cmd);
 
     m_cmd->endRecording();
@@ -82,15 +83,13 @@ namespace dxvk {
   }
   
   
-  void DxvkContext::beginQuery(const DxvkQueryRevision& query) {
-    query.query->beginRecording(query.revision);
-    m_queries.enableQuery(m_cmd, query);
+  void DxvkContext::beginQuery(const Rc<DxvkGpuQuery>& query) {
+    m_queryManager.enableQuery(m_cmd, query);
   }
-  
-  
-  void DxvkContext::endQuery(const DxvkQueryRevision& query) {
-    m_queries.disableQuery(m_cmd, query);
-    query.query->endRecording(query.revision);
+
+
+  void DxvkContext::endQuery(const Rc<DxvkGpuQuery>& query) {
+    m_queryManager.disableQuery(m_cmd, query);
   }
   
   
@@ -1107,12 +1106,12 @@ namespace dxvk {
     if (this->validateComputeState()) {
       this->commitComputeInitBarriers();
 
-      m_queries.beginQueries(m_cmd,
+      m_queryManager.beginQueries(m_cmd,
         VK_QUERY_TYPE_PIPELINE_STATISTICS);
       
       m_cmd->cmdDispatch(x, y, z);
       
-      m_queries.endQueries(m_cmd,
+      m_queryManager.endQueries(m_cmd,
         VK_QUERY_TYPE_PIPELINE_STATISTICS);
       
       this->commitComputePostBarriers();
@@ -1135,14 +1134,14 @@ namespace dxvk {
     if (this->validateComputeState()) {
       this->commitComputeInitBarriers();
 
-      m_queries.beginQueries(m_cmd,
+      m_queryManager.beginQueries(m_cmd,
         VK_QUERY_TYPE_PIPELINE_STATISTICS);
       
       m_cmd->cmdDispatchIndirect(
         bufferSlice.handle,
         bufferSlice.offset);
       
-      m_queries.endQueries(m_cmd,
+      m_queryManager.endQueries(m_cmd,
         VK_QUERY_TYPE_PIPELINE_STATISTICS);
       
       this->commitComputePostBarriers();
@@ -1760,16 +1759,23 @@ namespace dxvk {
   void DxvkContext::signalEvent(const DxvkEventRevision& event) {
     m_cmd->trackEvent(event);
   }
+
+
+  void DxvkContext::signalGpuEvent(const Rc<DxvkGpuEvent>& event) {
+    this->spillRenderPass();
+    
+    DxvkGpuEventHandle handle = m_gpuEvents->allocEvent();
+
+    m_cmd->cmdSetEvent(handle.event,
+      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+
+    m_cmd->trackGpuEvent(event->reset(handle));
+    m_cmd->trackResource(event);
+  }
   
   
-  void DxvkContext::writeTimestamp(const DxvkQueryRevision& query) {
-    DxvkQueryHandle handle = m_queries.allocQuery(m_cmd, query);
-    
-    m_cmd->cmdWriteTimestamp(
-      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-      handle.queryPool, handle.queryId);
-    
-    query.query->endRecording(query.revision);
+  void DxvkContext::writeTimestamp(const Rc<DxvkGpuQuery>& query) {
+    m_queryManager.writeTimestamp(m_cmd, query);
   }
   
   
@@ -2300,7 +2306,12 @@ namespace dxvk {
     const Rc<DxvkImage>&            srcImage,
     const VkImageSubresourceLayers& srcSubresources,
           VkFormat                  format) {
-    m_barriers.recordCommands(m_cmd);
+    auto dstSubresourceRange = vk::makeSubresourceRange(dstSubresources);
+    auto srcSubresourceRange = vk::makeSubresourceRange(srcSubresources);
+    
+    if (m_barriers.isImageDirty(dstImage, dstSubresourceRange, DxvkAccess::Write)
+     || m_barriers.isImageDirty(srcImage, srcSubresourceRange, DxvkAccess::Write))
+      m_barriers.recordCommands(m_cmd);
 
     // Create image views covering the requested subresourcs
     DxvkImageViewCreateInfo dstViewInfo;
@@ -2316,7 +2327,7 @@ namespace dxvk {
     DxvkImageViewCreateInfo srcViewInfo;
     srcViewInfo.type      = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     srcViewInfo.format    = format;
-    srcViewInfo.usage     = VK_IMAGE_USAGE_SAMPLED_BIT;
+    srcViewInfo.usage     = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     srcViewInfo.aspect    = srcSubresources.aspectMask;
     srcViewInfo.minLevel  = srcSubresources.mipLevel;
     srcViewInfo.numLevels = 1;
@@ -2327,48 +2338,12 @@ namespace dxvk {
     Rc<DxvkImageView> srcImageView = m_device->createImageView(srcImage, srcViewInfo);
 
     // Create a framebuffer and pipeline for the resolve op
-    DxvkMetaResolvePipeline pipeInfo = m_metaResolve->getPipeline(format);
-
     Rc<DxvkMetaResolveRenderPass> fb = new DxvkMetaResolveRenderPass(
       m_device->vkd(), dstImageView, srcImageView);
 
-    // Create descriptor set pointing to the source image
-    VkDescriptorImageInfo descriptorImage;
-    descriptorImage.sampler          = VK_NULL_HANDLE;
-    descriptorImage.imageView        = srcImageView->handle();
-    descriptorImage.imageLayout      = srcImageView->imageInfo().layout;
-
-    VkWriteDescriptorSet descriptorWrite;
-    descriptorWrite.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    descriptorWrite.pNext            = nullptr;
-    descriptorWrite.dstBinding       = 0;
-    descriptorWrite.dstArrayElement  = 0;
-    descriptorWrite.descriptorCount  = 1;
-    descriptorWrite.descriptorType   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    descriptorWrite.pImageInfo       = &descriptorImage;
-    descriptorWrite.pBufferInfo      = nullptr;
-    descriptorWrite.pTexelBufferView = nullptr;
-    
-    descriptorWrite.dstSet = allocateDescriptorSet(pipeInfo.dsetLayout);
-    m_cmd->updateDescriptorSets(1, &descriptorWrite);
-
-    // Set up viewport and scissor rect
-    VkExtent3D passExtent = dstImageView->mipLevelExtent(0);
-    passExtent.depth = dstSubresources.layerCount;
-
-    VkViewport viewport;
-    viewport.x        = 0.0f;
-    viewport.y        = 0.0f;
-    viewport.width    = float(passExtent.width);
-    viewport.height   = float(passExtent.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    
-    VkRect2D scissor;
-    scissor.offset    = { 0, 0 };
-    scissor.extent    = { passExtent.width, passExtent.height };
-
     // Render pass info
+    VkExtent3D passExtent = dstImageView->mipLevelExtent(0);
+
     VkRenderPassBeginInfo info;
     info.sType              = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     info.pNext              = nullptr;
@@ -2381,16 +2356,24 @@ namespace dxvk {
     
     // Perform the actual resolve operation
     m_cmd->cmdBeginRenderPass(&info, VK_SUBPASS_CONTENTS_INLINE);
-    m_cmd->cmdBindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, pipeInfo.pipeHandle);
-    m_cmd->cmdBindDescriptorSet(VK_PIPELINE_BIND_POINT_GRAPHICS,
-      pipeInfo.pipeLayout, descriptorWrite.dstSet, 0, nullptr);
-
-    m_cmd->cmdSetViewport(0, 1, &viewport);
-    m_cmd->cmdSetScissor (0, 1, &scissor);
-    
-    m_cmd->cmdDraw(1, passExtent.depth, 0, 0);
     m_cmd->cmdEndRenderPass();
 
+    m_barriers.accessImage(
+      dstImage, dstSubresourceRange,
+      dstImage->info().layout,
+      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
+      dstImage->info().layout,
+      dstImage->info().stages,
+      dstImage->info().access);
+
+    m_barriers.accessImage(
+      srcImage, srcSubresourceRange,
+      srcImage->info().layout,
+      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
+      srcImage->info().layout,
+      srcImage->info().stages,
+      srcImage->info().access);
+    
     m_cmd->trackResource(fb);
     m_cmd->trackResource(dstImage);
     m_cmd->trackResource(srcImage);
@@ -2418,8 +2401,8 @@ namespace dxvk {
         m_state.om.renderPassOps);
       
       // Begin occlusion queries
-      m_queries.beginQueries(m_cmd, VK_QUERY_TYPE_OCCLUSION);
-      m_queries.beginQueries(m_cmd, VK_QUERY_TYPE_PIPELINE_STATISTICS);
+      m_queryManager.beginQueries(m_cmd, VK_QUERY_TYPE_OCCLUSION);
+      m_queryManager.beginQueries(m_cmd, VK_QUERY_TYPE_PIPELINE_STATISTICS);
     }
   }
   
@@ -2433,8 +2416,8 @@ namespace dxvk {
 
       this->pauseTransformFeedback();
       
-      m_queries.endQueries(m_cmd, VK_QUERY_TYPE_OCCLUSION);
-      m_queries.endQueries(m_cmd, VK_QUERY_TYPE_PIPELINE_STATISTICS);
+      m_queryManager.endQueries(m_cmd, VK_QUERY_TYPE_OCCLUSION);
+      m_queryManager.endQueries(m_cmd, VK_QUERY_TYPE_PIPELINE_STATISTICS);
       
       this->renderPassUnbindFramebuffer();
       this->unbindGraphicsPipeline();
@@ -2532,20 +2515,34 @@ namespace dxvk {
   void DxvkContext::resetRenderPassOps(
     const DxvkRenderTargets&    renderTargets,
           DxvkRenderPassOps&    renderPassOps) {
-    renderPassOps.barrier.srcStages = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    VkPipelineStageFlags shaderStages = m_device->getShaderPipelineStages()
+                                      & ~VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    
+    renderPassOps.barrier.srcStages = shaderStages
+                                    | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT
+                                    | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT
+                                    | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                                    | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
+                                    | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                    | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     renderPassOps.barrier.srcAccess = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT
                                     | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
                                     | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
                                     | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
-                                    | VK_ACCESS_TRANSFORM_FEEDBACK_WRITE_BIT_EXT
-                                    | VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT
-                                    | VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_WRITE_BIT_EXT
                                     | VK_ACCESS_INDIRECT_COMMAND_READ_BIT
                                     | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT
                                     | VK_ACCESS_INDEX_READ_BIT
                                     | VK_ACCESS_UNIFORM_READ_BIT
                                     | VK_ACCESS_SHADER_READ_BIT
                                     | VK_ACCESS_SHADER_WRITE_BIT;
+    
+    if (m_device->features().extTransformFeedback.transformFeedback) {
+      renderPassOps.barrier.srcStages |= VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT;
+      renderPassOps.barrier.srcAccess |= VK_ACCESS_TRANSFORM_FEEDBACK_WRITE_BIT_EXT
+                                      |  VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT
+                                      |  VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_WRITE_BIT_EXT;
+    }
+
     renderPassOps.barrier.dstStages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     renderPassOps.barrier.dstAccess = renderPassOps.barrier.srcAccess
                                     | VK_ACCESS_TRANSFER_READ_BIT
@@ -2609,7 +2606,7 @@ namespace dxvk {
       m_cmd->cmdBeginTransformFeedback(
         0, MaxNumXfbBuffers, ctrBuffers, ctrOffsets);
       
-      m_queries.beginQueries(m_cmd,
+      m_queryManager.beginQueries(m_cmd,
         VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT);
     }
   }
@@ -2632,7 +2629,7 @@ namespace dxvk {
           m_cmd->trackResource(m_state.xfb.counters[i].buffer());
       }
 
-      m_queries.endQueries(m_cmd, 
+      m_queryManager.endQueries(m_cmd, 
         VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT);
       
       m_cmd->cmdEndTransformFeedback(

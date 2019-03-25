@@ -27,13 +27,10 @@ dxvk_shaders = files([
 
   'shaders/dxvk_pack_d24s8.comp',
   'shaders/dxvk_pack_d32s8.comp',
-  
-  'shaders/dxvk_resolve_vert.vert',
-  'shaders/dxvk_resolve_geom.geom',
-  'shaders/dxvk_resolve_frag_f.frag',
-  'shaders/dxvk_resolve_frag_i.frag',
-  'shaders/dxvk_resolve_frag_u.frag',
 
+  'shaders/dxvk_resolve_geom.geom',
+  'shaders/dxvk_resolve_vert.vert',
+  
   'hud/shaders/hud_line.frag',
   'hud/shaders/hud_text.frag',
   'hud/shaders/hud_vert.vert',
@@ -55,6 +52,8 @@ dxvk_src = files([
   'dxvk_event.cpp',
   'dxvk_format.cpp',
   'dxvk_framebuffer.cpp',
+  'dxvk_gpu_event.cpp',
+  'dxvk_gpu_query.cpp',
   'dxvk_graphics.cpp',
   'dxvk_image.cpp',
   'dxvk_instance.cpp',
@@ -71,10 +70,6 @@ dxvk_src = files([
   'dxvk_pipecache.cpp',
   'dxvk_pipelayout.cpp',
   'dxvk_pipemanager.cpp',
-  'dxvk_query.cpp',
-  'dxvk_query_pool.cpp',
-  'dxvk_query_manager.cpp',
-  'dxvk_query_tracker.cpp',
   'dxvk_queue.cpp',
   'dxvk_renderpass.cpp',
   'dxvk_resource.cpp',
