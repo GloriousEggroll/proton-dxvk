@@ -55,6 +55,10 @@ namespace dxvk {
       return rsDepthBiasEnable;
     }
 
+    bool useDynamicDepthBounds() const {
+      return dsEnableDepthBoundsTest;
+    }
+
     bool useDynamicBlendConstants() const {
       bool result = false;
       
@@ -92,10 +96,10 @@ namespace dxvk {
     VkSampleCountFlags                  msSampleCount;
     uint32_t                            msSampleMask;
     VkBool32                            msEnableAlphaToCoverage;
-    VkBool32                            msEnableAlphaToOne;
     
     VkBool32                            dsEnableDepthTest;
     VkBool32                            dsEnableDepthWrite;
+    VkBool32                            dsEnableDepthBoundsTest;
     VkBool32                            dsEnableStencilTest;
     VkCompareOp                         dsDepthCompareOp;
     VkStencilOpState                    dsStencilOpFront;
@@ -105,6 +109,8 @@ namespace dxvk {
     VkLogicOp                           omLogicOp;
     VkPipelineColorBlendAttachmentState omBlendAttachments[MaxNumRenderTargets];
     VkComponentMapping                  omComponentMapping[MaxNumRenderTargets];
+
+    uint32_t                            scSpecConstants[MaxNumSpecConstants];
   };
   
   
@@ -242,16 +248,17 @@ namespace dxvk {
       VkPipeline                    pipeline;
     };
     
-    Rc<vk::DeviceFn>        m_vkd;
-    DxvkPipelineManager*    m_pipeMgr;
+    Rc<vk::DeviceFn>          m_vkd;
+    DxvkPipelineManager*      m_pipeMgr;
 
-    Rc<DxvkPipelineLayout>  m_layout;
-    Rc<DxvkShaderModule>    m_vs;
-    Rc<DxvkShaderModule>    m_tcs;
-    Rc<DxvkShaderModule>    m_tes;
-    Rc<DxvkShaderModule>    m_gs;
-    Rc<DxvkShaderModule>    m_fs;
-    Rc<DxvkShaderModule>    m_fs2;
+    DxvkDescriptorSlotMapping m_slotMapping;
+
+    Rc<DxvkShader>            m_vs;
+    Rc<DxvkShader>            m_tcs;
+    Rc<DxvkShader>            m_tes;
+    Rc<DxvkShader>            m_gs;
+    Rc<DxvkShader>            m_fs;
+    Rc<DxvkPipelineLayout>    m_layout;
     
     uint32_t m_vsIn  = 0;
     uint32_t m_fsOut = 0;
@@ -272,11 +279,15 @@ namespace dxvk {
     
     VkPipeline compilePipeline(
       const DxvkGraphicsPipelineStateInfo& state,
-            VkRenderPass                   renderPass,
+      const DxvkRenderPass&                renderPass,
             VkPipeline                     baseHandle) const;
     
     void destroyPipeline(
             VkPipeline                     pipeline) const;
+    
+    DxvkShaderModule createShaderModule(
+      const Rc<DxvkShader>&                shader,
+      const DxvkShaderModuleCreateInfo&    info) const;
     
     bool validatePipelineState(
       const DxvkGraphicsPipelineStateInfo& state) const;

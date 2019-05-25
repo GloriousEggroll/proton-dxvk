@@ -14,11 +14,16 @@ namespace dxvk {
 
     const DxvkDeviceFeatures& devFeatures = device->features();
     const DxvkDeviceInfo& devInfo = adapter->devicePropertiesExt();
+
+    const VkShaderStageFlags allShaderStages = device->getShaderPipelineStages();
     
     useDepthClipWorkaround
       = !devFeatures.extDepthClipEnable.depthClipEnable;
     useStorageImageReadWithoutFormat
       = devFeatures.core.features.shaderStorageImageReadWithoutFormat;
+    useSubgroupOpsForAtomicCounters
+      = (devInfo.coreSubgroup.supportedStages     & allShaderStages) == allShaderStages
+     && (devInfo.coreSubgroup.supportedOperations & VK_SUBGROUP_FEATURE_BALLOT_BIT);
     useSubgroupOpsForEarlyDiscard
       = (devInfo.coreSubgroup.subgroupSize >= 4)
      && (devInfo.coreSubgroup.supportedStages     & VK_SHADER_STAGE_FRAGMENT_BIT)
@@ -29,8 +34,10 @@ namespace dxvk {
       = adapter->matchesDriver(DxvkGpuVendor::Nvidia, VK_DRIVER_ID_NVIDIA_PROPRIETARY_KHR, 0, 0);
     
     strictDivision           = options.strictDivision;
-    constantBufferRangeCheck = options.constantBufferRangeCheck;
     zeroInitWorkgroupMemory  = options.zeroInitWorkgroupMemory;
+
+    if (DxvkGpuVendor(devInfo.core.properties.vendorID) != DxvkGpuVendor::Amd)
+      constantBufferRangeCheck = options.constantBufferRangeCheck;
     
     // Disable early discard on RADV due to GPU hangs
     // Disable early discard on Nvidia because it may hurt performance

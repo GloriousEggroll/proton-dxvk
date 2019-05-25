@@ -122,6 +122,14 @@ namespace dxvk {
     { "MassEffectAndromeda.exe", {{
       { "dxgi.nvapiHack",                   "False" },
     }} },
+    /* Mirror`s Edge Catalyst: Crashes on AMD     */
+    { "MirrorsEdgeCatalyst.exe", {{
+      { "dxgi.customVendorId",              "10de" },
+    }} },
+    /* Mirror`s Edge Catalyst Trial               */
+    { "MirrorsEdgeCatalystTrial.exe", {{
+      { "dxgi.customVendorId",              "10de" },
+    }} },
     /* Star Wars Battlefront (2015)               */
     { "starwarsbattlefront.exe", {{
       { "dxgi.nvapiHack",                   "False" },
@@ -138,6 +146,14 @@ namespace dxvk {
     { "Grim Dawn.exe", {{
       { "d3d11.constantBufferRangeCheck",   "True" },
     }} },
+    /* NieR:Automata                              */
+    { "NieRAutomata.exe", {{
+      { "d3d11.constantBufferRangeCheck",   "True" },
+    }} },
+    /* The Surge                                  */
+    { "TheSurge.exe", {{
+      { "d3d11.allowMapFlagNoWait",         "True" },
+    }} }
   }};
 
 
@@ -161,26 +177,46 @@ namespace dxvk {
   }
 
 
-  static void parseUserConfigLine(Config& config, const std::string& line) {
+  struct ConfigContext {
+    bool active;
+  };
+
+
+  static void parseUserConfigLine(Config& config, ConfigContext& ctx, const std::string& line) {
     std::stringstream key;
     std::stringstream value;
 
     // Extract the key
     size_t n = skipWhitespace(line, 0);
-    while (n < line.size() && isValidKeyChar(line[n]))
-      key << line[n++];
-    
-    // Check whether the next char is a '='
-    n = skipWhitespace(line, n);
-    if (n >= line.size() || line[n] != '=')
-      return;
 
-    // Extract the value
-    n = skipWhitespace(line, n + 1);
-    while (n < line.size() && !isWhitespace(line[n]))
-      value << line[n++];
-    
-    config.setOption(key.str(), value.str());
+    if (n < line.size() && line[n] == '[') {
+      n += 1;
+
+      size_t e = line.size() - 1;
+      while (e > n && line[e] != ']')
+        e -= 1;
+
+      while (n < e)
+        key << line[n++];
+      
+      ctx.active = key.str() == env::getExeName();
+    } else {
+      while (n < line.size() && isValidKeyChar(line[n]))
+        key << line[n++];
+      
+      // Check whether the next char is a '='
+      n = skipWhitespace(line, n);
+      if (n >= line.size() || line[n] != '=')
+        return;
+
+      // Extract the value
+      n = skipWhitespace(line, n + 1);
+      while (n < line.size() && !isWhitespace(line[n]))
+        value << line[n++];
+      
+      if (ctx.active)
+        config.setOption(key.str(), value.str());
+    }
   }
 
 
@@ -316,11 +352,15 @@ namespace dxvk {
     // help when debugging configuration issues
     Logger::info(str::format("Found config file: ", filePath));
 
+    // Initialize parser context
+    ConfigContext ctx;
+    ctx.active = true;
+
     // Parse the file line by line
     std::string line;
 
     while (std::getline(stream, line))
-      parseUserConfigLine(config, line);
+      parseUserConfigLine(config, ctx, line);
     
     return config;
   }

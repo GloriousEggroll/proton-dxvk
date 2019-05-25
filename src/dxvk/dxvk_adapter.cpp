@@ -215,8 +215,12 @@ namespace dxvk {
                 || !required.core.features.variableMultisampleRate)
         && (m_deviceFeatures.core.features.inheritedQueries
                 || !required.core.features.inheritedQueries)
+        && (m_deviceFeatures.extConditionalRendering.conditionalRendering
+                || !required.extConditionalRendering.conditionalRendering)
         && (m_deviceFeatures.extDepthClipEnable.depthClipEnable
                 || !required.extDepthClipEnable.depthClipEnable)
+        && (m_deviceFeatures.extHostQueryReset.hostQueryReset
+                || !required.extHostQueryReset.hostQueryReset)
         && (m_deviceFeatures.extMemoryPriority.memoryPriority
                 || !required.extMemoryPriority.memoryPriority)
         && (m_deviceFeatures.extTransformFeedback.transformFeedback
@@ -236,15 +240,19 @@ namespace dxvk {
   Rc<DxvkDevice> DxvkAdapter::createDevice(std::string clientApi, DxvkDeviceFeatures enabledFeatures) {
     DxvkDeviceExtensions devExtensions;
 
-    std::array<DxvkExt*, 16> devExtensionList = {{
+    std::array<DxvkExt*, 20> devExtensionList = {{
       &devExtensions.amdMemoryOverallocationBehaviour,
+      &devExtensions.amdShaderFragmentMask,
+      &devExtensions.extConditionalRendering,
       &devExtensions.extDepthClipEnable,
+      &devExtensions.extHostQueryReset,
       &devExtensions.extMemoryPriority,
       &devExtensions.extShaderViewportIndexLayer,
       &devExtensions.extTransformFeedback,
       &devExtensions.extVertexAttributeDivisor,
       &devExtensions.khrDedicatedAllocation,
       &devExtensions.khrDescriptorUpdateTemplate,
+      &devExtensions.khrDrawIndirectCount,
       &devExtensions.khrDriverProperties,
       &devExtensions.khrGetMemoryRequirements2,
       &devExtensions.khrImageFormatList,
@@ -274,10 +282,22 @@ namespace dxvk {
     enabledFeatures.core.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2_KHR;
     enabledFeatures.core.pNext = nullptr;
 
+    if (devExtensions.extConditionalRendering) {
+      enabledFeatures.extConditionalRendering.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT;
+      enabledFeatures.extConditionalRendering.pNext = enabledFeatures.core.pNext;
+      enabledFeatures.core.pNext = &enabledFeatures.extConditionalRendering;
+    }
+
     if (devExtensions.extDepthClipEnable) {
       enabledFeatures.extDepthClipEnable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT;
       enabledFeatures.extDepthClipEnable.pNext = enabledFeatures.core.pNext;
       enabledFeatures.core.pNext = &enabledFeatures.extDepthClipEnable;
+    }
+
+    if (devExtensions.extHostQueryReset) {
+      enabledFeatures.extHostQueryReset.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT;
+      enabledFeatures.extHostQueryReset.pNext = enabledFeatures.core.pNext;
+      enabledFeatures.core.pNext = &enabledFeatures.extHostQueryReset;
     }
 
     if (devExtensions.extMemoryPriority) {
@@ -478,9 +498,19 @@ namespace dxvk {
     m_deviceFeatures.core.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2_KHR;
     m_deviceFeatures.core.pNext = nullptr;
 
+    if (m_deviceExtensions.supports(VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME)) {
+      m_deviceFeatures.extConditionalRendering.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT;
+      m_deviceFeatures.extConditionalRendering.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.extConditionalRendering);
+    }
+
     if (m_deviceExtensions.supports(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME)) {
       m_deviceFeatures.extDepthClipEnable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT;
       m_deviceFeatures.extDepthClipEnable.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.extDepthClipEnable);
+    }
+
+    if (m_deviceExtensions.supports(VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME)) {
+      m_deviceFeatures.extHostQueryReset.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT;
+      m_deviceFeatures.extHostQueryReset.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.extHostQueryReset);
     }
 
     if (m_deviceExtensions.supports(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME)) {

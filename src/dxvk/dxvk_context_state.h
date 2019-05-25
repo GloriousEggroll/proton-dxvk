@@ -22,6 +22,7 @@ namespace dxvk {
    */
   enum class DxvkContextFlag : uint64_t  {
     GpRenderPassBound,          ///< Render pass is currently bound
+    GpCondActive,               ///< Conditional rendering is enabled
     GpXfbActive,                ///< Transform feedback is enabled
     GpClearRenderTargets,       ///< Render targets need to be cleared
     GpDirtyFramebuffer,         ///< Framebuffer binding is out of date
@@ -36,10 +37,13 @@ namespace dxvk {
     GpDirtyXfbCounters,         ///< Counter buffer values are dirty
     GpDirtyBlendConstants,      ///< Blend constants have changed
     GpDirtyDepthBias,           ///< Depth bias has changed
+    GpDirtyDepthBounds,         ///< Depth bounds have changed
     GpDirtyStencilRef,          ///< Stencil reference has changed
     GpDirtyViewport,            ///< Viewport state has changed
+    GpDirtyPredicate,           ///< Predicate has changed
     GpDynamicBlendConstants,    ///< Blend constants are dynamic
     GpDynamicDepthBias,         ///< Depth bias is dynamic
+    GpDynamicDepthBounds,       ///< Depth bounds are dynamic
     GpDynamicStencilRef,        ///< Stencil reference is dynamic
     
     CpDirtyPipeline,            ///< Compute pipeline binding are out of date
@@ -49,6 +53,7 @@ namespace dxvk {
     CpDirtyDescriptorSet,       ///< Compute descriptor set needs to be updated
     
     DirtyDrawBuffer,            ///< Indirect argument buffer is dirty
+    DirtyPushConstants,         ///< Push constant data has changed
   };
   
   using DxvkContextFlags = Flags<DxvkContextFlag>;
@@ -69,13 +74,13 @@ namespace dxvk {
 
   struct DxvkIndirectDrawState {
     DxvkBufferSlice argBuffer;
+    DxvkBufferSlice cntBuffer;
   };
   
   
   struct DxvkVertexInputState {
     DxvkBufferSlice indexBuffer;
     VkIndexType     indexType   = VK_INDEX_TYPE_UINT32;
-    uint32_t        bindingMask = 0;
     
     std::array<DxvkBufferSlice, DxvkLimits::MaxNumVertexBindings> vertexBuffers = { };
     std::array<uint32_t,        DxvkLimits::MaxNumVertexBindings> vertexStrides = { };
@@ -94,6 +99,11 @@ namespace dxvk {
     DxvkRenderTargets   renderTargets;
     DxvkRenderPassOps   renderPassOps;
     Rc<DxvkFramebuffer> framebuffer       = nullptr;
+  };
+
+
+  struct DxvkPushConstantState {
+    char data[MaxPushConstantSize];
   };
 
 
@@ -132,7 +142,14 @@ namespace dxvk {
   struct DxvkDynamicState {
     DxvkBlendConstants  blendConstants    = { 0.0f, 0.0f, 0.0f, 0.0f };
     DxvkDepthBias       depthBias         = { 0.0f, 0.0f, 0.0f };
+    DxvkDepthBounds     depthBounds       = { false, 0.0f, 1.0f };
     uint32_t            stencilReference  = 0;
+  };
+
+
+  struct DxvkCondRenderState {
+    DxvkBufferSlice                 predicate;
+    VkConditionalRenderingFlagsEXT  flags;
   };
   
   
@@ -147,8 +164,10 @@ namespace dxvk {
     DxvkVertexInputState      vi;
     DxvkViewportState         vp;
     DxvkOutputMergerState     om;
+    DxvkPushConstantState     pc;
     DxvkXfbState              xfb;
     DxvkDynamicState          dyn;
+    DxvkCondRenderState       cond;
     
     DxvkGraphicsPipelineState gp;
     DxvkComputePipelineState  cp;

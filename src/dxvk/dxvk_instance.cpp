@@ -102,7 +102,7 @@ namespace dxvk {
     appInfo.pApplicationName      = appName.c_str();
     appInfo.applicationVersion    = 0;
     appInfo.pEngineName           = "DXVK";
-    appInfo.engineVersion         = VK_MAKE_VERSION(1, 0, 3);
+    appInfo.engineVersion         = VK_MAKE_VERSION(1, 2, 1);
     appInfo.apiVersion            = VK_MAKE_VERSION(1, 1, 0);
     
     VkInstanceCreateInfo info;
@@ -151,7 +151,7 @@ namespace dxvk {
     }
     
     std::sort(result.begin(), result.end(),
-      [this] (const Rc<DxvkAdapter>& a, const Rc<DxvkAdapter>& b) -> bool {
+      [] (const Rc<DxvkAdapter>& a, const Rc<DxvkAdapter>& b) -> bool {
         return a->deviceProperties().deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
             && b->deviceProperties().deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
       });

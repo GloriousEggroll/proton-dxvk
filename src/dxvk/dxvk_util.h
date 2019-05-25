@@ -88,6 +88,20 @@ namespace dxvk::util {
   }
   
   /**
+   * \brief Computes mip level extent
+   *
+   * \param [in] size Base mip level extent
+   * \param [in] level mip level to compute
+   * \returns Extent of the given mip level
+   */
+  inline VkExtent3D computeMipLevelExtent(VkExtent3D size, uint32_t level) {
+    size.width  = std::max(1u, size.width  >> level);
+    size.height = std::max(1u, size.height >> level);
+    size.depth  = std::max(1u, size.depth  >> level);
+    return size;
+  }
+  
+  /**
    * \brief Computes block offset for compressed images
    * 
    * Convenience function to compute the block position
@@ -160,6 +174,17 @@ namespace dxvk::util {
   inline uint32_t flattenImageExtent(VkExtent3D extent) {
     return extent.width * extent.height * extent.depth;
   }
+
+  /**
+   * \brief Checks whether the depth aspect is read-only in a layout
+   * 
+   * \param [in] layout Image layout. Must be a valid depth-stencil attachment laoyut.
+   * \returns \c true if the depth aspect for images in this layout is read-only.
+   */
+  inline bool isDepthReadOnlyLayout(VkImageLayout layout) {
+    return layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+        || layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
+  }
   
   /**
    * \brief Computes image data size, in bytes
@@ -211,6 +236,10 @@ namespace dxvk::util {
   uint32_t getComponentIndex(
           VkComponentSwizzle          component,
           uint32_t                    identity);
+  
+  VkClearColorValue swizzleClearColor(
+          VkClearColorValue           color,
+          VkComponentMapping          mapping);
   
   bool isBlendConstantBlendFactor(
           VkBlendFactor               factor);

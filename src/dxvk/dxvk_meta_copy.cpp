@@ -1,14 +1,13 @@
 #include "dxvk_meta_copy.h"
 
+#include <dxvk_copy_vert.h>
+#include <dxvk_copy_geom.h>
 #include <dxvk_copy_color_1d.h>
 #include <dxvk_copy_color_2d.h>
 #include <dxvk_copy_color_ms.h>
 #include <dxvk_copy_depth_1d.h>
 #include <dxvk_copy_depth_2d.h>
 #include <dxvk_copy_depth_ms.h>
-
-#include <dxvk_resolve_vert.h>
-#include <dxvk_resolve_geom.h>
 
 namespace dxvk {
 
@@ -35,18 +34,6 @@ namespace dxvk {
   VkRenderPass DxvkMetaCopyRenderPass::createRenderPass(bool discard) const {
     auto aspect = m_dstImageView->info().aspect;
 
-    std::array<VkSubpassDependency, 2> subpassDeps = {{
-      { VK_SUBPASS_EXTERNAL, 0,
-        m_dstImageView->imageInfo().stages,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0 },
-      { 0, VK_SUBPASS_EXTERNAL,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        m_dstImageView->imageInfo().stages,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        m_dstImageView->imageInfo().access, 0 },
-    }};
-    
     VkAttachmentDescription attachment;
     attachment.flags            = 0;
     attachment.format           = m_dstImageView->info().format;
@@ -96,8 +83,8 @@ namespace dxvk {
     info.pAttachments           = &attachment;
     info.subpassCount           = 1;
     info.pSubpasses             = &subpass;
-    info.dependencyCount        = subpassDeps.size();
-    info.pDependencies          = subpassDeps.data();
+    info.dependencyCount        = 0;
+    info.pDependencies          = nullptr;
 
     VkRenderPass result = VK_NULL_HANDLE;
     if (m_vkd->vkCreateRenderPass(m_vkd->device(), &info, nullptr, &result) != VK_SUCCESS)
@@ -132,8 +119,8 @@ namespace dxvk {
   DxvkMetaCopyObjects::DxvkMetaCopyObjects(const Rc<vk::DeviceFn>& vkd)
   : m_vkd         (vkd),
     m_sampler     (createSampler()),
-    m_shaderVert  (createShaderModule(dxvk_resolve_vert)),
-    m_shaderGeom  (createShaderModule(dxvk_resolve_geom)),
+    m_shaderVert  (createShaderModule(dxvk_copy_vert)),
+    m_shaderGeom  (createShaderModule(dxvk_copy_geom)),
     m_color {
       createShaderModule(dxvk_copy_color_1d),
       createShaderModule(dxvk_copy_color_2d),

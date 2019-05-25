@@ -14,7 +14,6 @@
 #include "dxvk_pipecache.h"
 #include "dxvk_pipemanager.h"
 #include "dxvk_queue.h"
-#include "dxvk_query_pool.h"
 #include "dxvk_recycler.h"
 #include "dxvk_renderpass.h"
 #include "dxvk_sampler.h"
@@ -201,6 +200,25 @@ namespace dxvk {
      * \returns The context object
      */
     Rc<DxvkContext> createContext();
+
+    /**
+     * \brief Creates a GPU event
+     * \returns New GPU event
+     */
+    Rc<DxvkGpuEvent> createGpuEvent();
+
+    /**
+     * \brief Creates a query
+     * 
+     * \param [in] type Query type
+     * \param [in] flags Query flags
+     * \param [in] index Query index
+     * \returns New query
+     */
+    Rc<DxvkGpuQuery> createGpuQuery(
+            VkQueryType           type,
+            VkQueryControlFlags   flags,
+            uint32_t              index);
     
     /**
      * \brief Creates framebuffer for a set of render targets
@@ -321,6 +339,7 @@ namespace dxvk {
      * presenter's \c presentImage method.
      * \param [in] presenter The presenter
      * \param [in] semaphore Sync semaphore
+     * \returns Status of the operation
      */
     VkResult presentImage(
       const Rc<vk::Presenter>&        presenter,
@@ -329,11 +348,11 @@ namespace dxvk {
     /**
      * \brief Submits a command list
      * 
-     * Synchronization arguments are optional. 
+     * Submits the given command list to the device using
+     * the given set of optional synchronization primitives.
      * \param [in] commandList The command list to submit
      * \param [in] waitSync (Optional) Semaphore to wait on
      * \param [in] wakeSync (Optional) Semaphore to notify
-     * \returns Synchronization fence
      */
     void submitCommandList(
       const Rc<DxvkCommandList>&      commandList,
@@ -348,7 +367,8 @@ namespace dxvk {
      * to lock the queue before submitting command buffers.
      */
     void lockSubmission() {
-      m_submissionLock.lock();
+      m_submissionQueue.synchronize();
+      m_submissionQueue.lockDeviceQueue();
     }
     
     /**
@@ -358,7 +378,7 @@ namespace dxvk {
      * itself can use them for submissions again.
      */
     void unlockSubmission() {
-      m_submissionLock.unlock();
+      m_submissionQueue.unlockDeviceQueue();
     }
 
     /**
@@ -398,18 +418,20 @@ namespace dxvk {
     Rc<DxvkRenderPassPool>      m_renderPassPool;
     Rc<DxvkPipelineManager>     m_pipelineManager;
 
+    Rc<DxvkGpuEventPool>        m_gpuEventPool;
+    Rc<DxvkGpuQueryPool>        m_gpuQueryPool;
+
     Rc<DxvkMetaClearObjects>    m_metaClearObjects;
     Rc<DxvkMetaCopyObjects>     m_metaCopyObjects;
+    Rc<DxvkMetaResolveObjects>  m_metaResolveObjects;
     Rc<DxvkMetaMipGenObjects>   m_metaMipGenObjects;
     Rc<DxvkMetaPackObjects>     m_metaPackObjects;
-    Rc<DxvkMetaResolveObjects>  m_metaResolveObjects;
     
     DxvkUnboundResources        m_unboundResources;
     
     sync::Spinlock              m_statLock;
     DxvkStatCounters            m_statCounters;
     
-    std::mutex                  m_submissionLock;
     DxvkDeviceQueue             m_graphicsQueue;
     DxvkDeviceQueue             m_presentQueue;
     
@@ -465,6 +487,16 @@ namespace dxvk {
      */
     VkDescriptorImageInfo dummyImageViewDescriptor(VkImageViewType type) const {
       return m_unboundResources.imageViewDescriptor(type);
+    }
+    
+    /**
+     * \brief Dummy combined image sampler descriptor
+     * 
+     * \param [in] type Required view type
+     * \returns Descriptor that points to a dummy image
+     */
+    VkDescriptorImageInfo dummyImageSamplerDescriptor(VkImageViewType type) const {
+      return m_unboundResources.imageSamplerDescriptor(type);
     }
     
   };

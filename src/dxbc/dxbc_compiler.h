@@ -178,8 +178,10 @@ namespace dxvk {
     uint32_t builtinLayer         = 0;
     uint32_t builtinViewportId    = 0;
     
-    uint32_t invocationMask       = 0;
+    uint32_t builtinLaneId        = 0;
     uint32_t killState            = 0;
+
+    uint32_t specRsSampleCount    = 0;
   };
   
   
@@ -468,13 +470,6 @@ namespace dxvk {
     // Function state tracking. Required in order
     // to properly end functions in some cases.
     bool m_insideFunction = false;
-    
-    ///////////////////////////////////////////////
-    // Specialization constants. These are defined
-    // as needed by the getSpecConstant method.
-    std::array<DxbcRegisterValue,
-      uint32_t(DxvkSpecConstantId::SpecConstantIdMax) -
-      uint32_t(DxvkSpecConstantId::SpecConstantIdMin) + 1> m_specConstants;
     
     ///////////////////////////////////////////////////////////
     // Array of input values. Since v# registers are indexable
@@ -986,12 +981,12 @@ namespace dxvk {
     
     ////////////////////////////////////////
     // Spec constant declaration and access
-    DxbcRegisterValue getSpecConstant(
-            DxvkSpecConstantId      specId);
-    
-    DxbcSpecConstant getSpecConstantProperties(
-            DxvkSpecConstantId      specId);
-    
+    uint32_t emitNewSpecConstant(
+            DxvkSpecConstantId      specId,
+            DxbcScalarType          type,
+            uint32_t                value,
+      const char*                   name);
+
     ////////////////////////////
     // Input/output preparation
     void emitInputSetup();

@@ -19,11 +19,13 @@ namespace dxvk {
     m_memory            (new DxvkMemoryAllocator    (this)),
     m_renderPassPool    (new DxvkRenderPassPool     (vkd)),
     m_pipelineManager   (new DxvkPipelineManager    (this, m_renderPassPool.ptr())),
+    m_gpuEventPool      (new DxvkGpuEventPool       (vkd)),
+    m_gpuQueryPool      (new DxvkGpuQueryPool       (this)),
     m_metaClearObjects  (new DxvkMetaClearObjects   (vkd)),
     m_metaCopyObjects   (new DxvkMetaCopyObjects    (vkd)),
+    m_metaResolveObjects(new DxvkMetaResolveObjects (this)),
     m_metaMipGenObjects (new DxvkMetaMipGenObjects  (vkd)),
     m_metaPackObjects   (new DxvkMetaPackObjects    (vkd)),
-    m_metaResolveObjects(new DxvkMetaResolveObjects (vkd)),
     m_unboundResources  (this),
     m_submissionQueue   (this) {
     m_graphicsQueue.queueFamily = m_adapter->graphicsQueueFamily();
@@ -140,11 +142,26 @@ namespace dxvk {
   Rc<DxvkContext> DxvkDevice::createContext() {
     return new DxvkContext(this,
       m_pipelineManager,
+      m_gpuEventPool,
+      m_gpuQueryPool,
       m_metaClearObjects,
       m_metaCopyObjects,
+      m_metaResolveObjects,
       m_metaMipGenObjects,
-      m_metaPackObjects,
-      m_metaResolveObjects);
+      m_metaPackObjects);
+  }
+
+
+  Rc<DxvkGpuEvent> DxvkDevice::createGpuEvent() {
+    return new DxvkGpuEvent(m_vkd);
+  }
+
+
+  Rc<DxvkGpuQuery> DxvkDevice::createGpuQuery(
+          VkQueryType           type,
+          VkQueryControlFlags   flags,
+          uint32_t              index) {
+    return new DxvkGpuQuery(m_vkd, type, flags, index);
   }
   
   
@@ -245,8 +262,10 @@ namespace dxvk {
   VkResult DxvkDevice::presentImage(
     const Rc<vk::Presenter>&        presenter,
           VkSemaphore               semaphore) {
-    std::lock_guard<std::mutex> queueLock(m_submissionLock);
-    VkResult status = presenter->presentImage(semaphore);
+    DxvkPresentInfo presentInfo;
+    presentInfo.presenter = presenter;
+    presentInfo.waitSync  = semaphore;
+    VkResult status = m_submissionQueue.present(presentInfo);
 
     if (status != VK_SUCCESS)
       return status;
@@ -261,32 +280,22 @@ namespace dxvk {
     const Rc<DxvkCommandList>&      commandList,
           VkSemaphore               waitSync,
           VkSemaphore               wakeSync) {
-    VkResult status;
-    
-    { // Queue submissions are not thread safe
-      std::lock_guard<std::mutex> queueLock(m_submissionLock);
-      std::lock_guard<sync::Spinlock> statLock(m_statLock);
-      
-      m_statCounters.merge(commandList->statCounters());
-      m_statCounters.addCtr(DxvkStatCounter::QueueSubmitCount, 1);
-      
-      status = commandList->submit(
-        m_graphicsQueue.queueHandle,
-        waitSync, wakeSync);
-    }
-    
-    if (status == VK_SUCCESS) {
-      // Add this to the set of running submissions
-      m_submissionQueue.submit(commandList);
-    } else {
-      Logger::err(str::format(
-        "DxvkDevice: Command buffer submission failed: ",
-        status));
-    }
+    DxvkSubmitInfo submitInfo;
+    submitInfo.cmdList  = commandList;
+    submitInfo.queue    = m_graphicsQueue.queueHandle;
+    submitInfo.waitSync = waitSync;
+    submitInfo.wakeSync = wakeSync;
+    m_submissionQueue.submit(submitInfo);
+
+    std::lock_guard<sync::Spinlock> statLock(m_statLock);
+    m_statCounters.merge(commandList->statCounters());
+    m_statCounters.addCtr(DxvkStatCounter::QueueSubmitCount, 1);
   }
   
   
   void DxvkDevice::waitForIdle() {
+    m_submissionQueue.synchronize();
+
     if (m_vkd->vkDeviceWaitIdle(m_vkd->device()) != VK_SUCCESS)
       Logger::err("DxvkDevice: waitForIdle: Operation failed");
   }

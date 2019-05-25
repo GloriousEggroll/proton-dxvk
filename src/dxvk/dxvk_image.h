@@ -190,11 +190,7 @@ namespace dxvk {
      * \returns Size of that level
      */
     VkExtent3D mipLevelExtent(uint32_t level) const {
-      VkExtent3D size = m_info.extent;
-      size.width  = std::max(1u, size.width  >> level);
-      size.height = std::max(1u, size.height >> level);
-      size.depth  = std::max(1u, size.depth  >> level);
-      return size;
+      return util::computeMipLevelExtent(m_info.extent, level);
     }
     
     /**
@@ -372,8 +368,12 @@ namespace dxvk {
     }
     
     /**
-     * \brief Subresource range
-     * \returns Subresource range
+     * \brief View subresource range
+     *
+     * Returns the subresource range from the image
+     * description. For 2D views of 3D images, this
+     * will return the viewed 3D slices.
+     * \returns View subresource range
      */
     VkImageSubresourceRange subresources() const {
       VkImageSubresourceRange result;
@@ -382,6 +382,29 @@ namespace dxvk {
       result.levelCount     = m_info.numLevels;
       result.baseArrayLayer = m_info.minLayer;
       result.layerCount     = m_info.numLayers;
+      return result;
+    }
+
+    /**
+     * \brief Actual image subresource range
+     *
+     * Handles 3D images correctly in that it only
+     * returns one single array layer. Use this for
+     * barriers.
+     * \returns Image subresource range
+     */
+    VkImageSubresourceRange imageSubresources() const {
+      VkImageSubresourceRange result;
+      result.aspectMask     = m_info.aspect;
+      result.baseMipLevel   = m_info.minLevel;
+      result.levelCount     = m_info.numLevels;
+      if (likely(m_image->info().type != VK_IMAGE_TYPE_3D)) {
+        result.baseArrayLayer = m_info.minLayer;
+        result.layerCount     = m_info.numLayers;
+      } else {
+        result.baseArrayLayer = 0;
+        result.layerCount     = 1;
+      }
       return result;
     }
     
