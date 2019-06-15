@@ -211,7 +211,7 @@ namespace dxvk {
     m_state.om.dsState = nullptr;
     
     for (uint32_t i = 0; i < 4; i++)
-      m_state.om.blendFactor[i] = 0.0f;
+      m_state.om.blendFactor[i] = 1.0f;
     
     m_state.om.sampleMask = D3D11_DEFAULT_SAMPLE_MASK;
     m_state.om.stencilRef = D3D11_DEFAULT_STENCIL_REFERENCE;
@@ -883,10 +883,8 @@ namespace dxvk {
     if (!dsv)
       return;
     
-    // Figure out which aspects to clear based
-    // on the image format and the clear flags.
-    const Rc<DxvkImageView> view = dsv->GetImageView();
-    
+    // Figure out which aspects to clear based on
+    // the image view properties and clear flags.
     VkImageAspectFlags aspectMask = 0;
     
     if (ClearFlags & D3D11_CLEAR_DEPTH)
@@ -895,7 +893,10 @@ namespace dxvk {
     if (ClearFlags & D3D11_CLEAR_STENCIL)
       aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
     
-    aspectMask &= imageFormatInfo(view->info().format)->aspectMask;
+    aspectMask &= dsv->GetWritableAspectMask();
+
+    if (!aspectMask)
+      return;
     
     VkClearValue clearValue;
     clearValue.depthStencil.depth   = Depth;
@@ -904,7 +905,7 @@ namespace dxvk {
     EmitCs([
       cClearValue = clearValue,
       cAspectMask = aspectMask,
-      cImageView  = view
+      cImageView  = dsv->GetImageView()
     ] (DxvkContext* ctx) {
       ctx->clearRenderTarget(
         cImageView,
@@ -1077,7 +1078,12 @@ namespace dxvk {
 
     if (!view || view->GetResourceType() == D3D11_RESOURCE_DIMENSION_BUFFER)
       return;
-      
+
+    D3D11_COMMON_RESOURCE_DESC resourceDesc = view->GetResourceDesc();
+
+    if (!(resourceDesc.MiscFlags & D3D11_RESOURCE_MISC_GENERATE_MIPS))
+      return;
+
     EmitCs([cDstImageView = view->GetImageView()]
     (DxvkContext* ctx) {
       ctx->generateMipmaps(cDstImageView);
@@ -1586,12 +1592,20 @@ namespace dxvk {
     
     for (uint32_t i = 0; i < NumBuffers; i++) {
       auto newBuffer = static_cast<D3D11Buffer*>(ppVertexBuffers[i]);
-      
-      m_state.ia.vertexBuffers[StartSlot + i].buffer = newBuffer;
-      m_state.ia.vertexBuffers[StartSlot + i].offset = pOffsets[i];
-      m_state.ia.vertexBuffers[StartSlot + i].stride = pStrides[i];
-      
-      BindVertexBuffer(StartSlot + i, newBuffer, pOffsets[i], pStrides[i]);
+      bool needsUpdate = m_state.ia.vertexBuffers[StartSlot + i].buffer != newBuffer;
+
+      if (needsUpdate)
+        m_state.ia.vertexBuffers[StartSlot + i].buffer = newBuffer;
+
+      needsUpdate |= m_state.ia.vertexBuffers[StartSlot + i].offset != pOffsets[i]
+                  || m_state.ia.vertexBuffers[StartSlot + i].stride != pStrides[i];
+
+      if (needsUpdate) {
+        m_state.ia.vertexBuffers[StartSlot + i].offset = pOffsets[i];
+        m_state.ia.vertexBuffers[StartSlot + i].stride = pStrides[i];
+
+        BindVertexBuffer(StartSlot + i, newBuffer, pOffsets[i], pStrides[i]);
+      }
     }
   }
   
@@ -1603,12 +1617,20 @@ namespace dxvk {
     D3D10DeviceLock lock = LockContext();
     
     auto newBuffer = static_cast<D3D11Buffer*>(pIndexBuffer);
-    
-    m_state.ia.indexBuffer.buffer = newBuffer;
-    m_state.ia.indexBuffer.offset = Offset;
-    m_state.ia.indexBuffer.format = Format;
-    
-    BindIndexBuffer(newBuffer, Offset, Format);
+    bool needsUpdate = m_state.ia.indexBuffer.buffer != newBuffer;
+
+    if (needsUpdate)
+      m_state.ia.indexBuffer.buffer = newBuffer;
+
+    needsUpdate |= m_state.ia.indexBuffer.offset != Offset
+                || m_state.ia.indexBuffer.format != Format;
+
+    if (needsUpdate) {
+      m_state.ia.indexBuffer.offset = Offset;
+      m_state.ia.indexBuffer.format = Format;
+
+      BindIndexBuffer(newBuffer, Offset, Format);
+    }
   }
   
   
@@ -2764,6 +2786,9 @@ namespace dxvk {
           UINT                              NumViewports,
     const D3D11_VIEWPORT*                   pViewports) {
     D3D10DeviceLock lock = LockContext();
+
+    if (NumViewports > m_state.rs.viewports.size())
+      return;
     
     bool dirty = m_state.rs.numViewports != NumViewports;
     m_state.rs.numViewports = NumViewports;
@@ -2807,7 +2832,7 @@ namespace dxvk {
         m_state.rs.scissors[i] = pRects[i];
       }
     }
-    
+
     if (m_state.rs.state != nullptr && dirty) {
       D3D11_RASTERIZER_DESC rsDesc;
       m_state.rs.state->GetDesc(&rsDesc);
@@ -3076,14 +3101,19 @@ namespace dxvk {
   
   
   void D3D11DeviceContext::ApplyViewportState() {
-    // We cannot set less than one viewport in Vulkan, and
-    // rendering with no active viewport is illegal anyway.
-    if (m_state.rs.numViewports == 0)
-      return;
-    
     std::array<VkViewport, D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> viewports;
     std::array<VkRect2D,   D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> scissors;
-    
+
+    // The backend can't handle a viewport count of zero,
+    // so we should at least specify one empty viewport
+    uint32_t viewportCount = m_state.rs.numViewports;
+
+    if (unlikely(!viewportCount)) {
+      viewportCount = 1;
+      viewports[0] = VkViewport();
+      scissors [0] = VkRect2D();
+    }
+
     // D3D11's coordinate system has its origin in the bottom left,
     // but the viewport coordinates are aligned to the top-left
     // corner so we can get away with flipping the viewport.
@@ -3109,7 +3139,17 @@ namespace dxvk {
     }
     
     for (uint32_t i = 0; i < m_state.rs.numViewports; i++) {
-      if (enableScissorTest && (i < m_state.rs.numScissors)) {
+      if (!enableScissorTest) {
+        scissors[i] = VkRect2D {
+          VkOffset2D { 0, 0 },
+          VkExtent2D {
+            D3D11_VIEWPORT_BOUNDS_MAX,
+            D3D11_VIEWPORT_BOUNDS_MAX } };
+      } else if (i >= m_state.rs.numScissors) {
+        scissors[i] = VkRect2D {
+          VkOffset2D { 0, 0 },
+          VkExtent2D { 0, 0 } };
+      } else {
         D3D11_RECT sr = m_state.rs.scissors[i];
         
         VkOffset2D srPosA;
@@ -3125,17 +3165,11 @@ namespace dxvk {
         srSize.height = uint32_t(srPosB.y - srPosA.y);
         
         scissors[i] = VkRect2D { srPosA, srSize };
-      } else {
-        scissors[i] = VkRect2D {
-          VkOffset2D { 0, 0 },
-          VkExtent2D {
-            D3D11_VIEWPORT_BOUNDS_MAX,
-            D3D11_VIEWPORT_BOUNDS_MAX } };
       }
     }
     
     EmitCs([
-      cViewportCount = m_state.rs.numViewports,
+      cViewportCount = viewportCount,
       cViewports     = viewports,
       cScissors      = scissors
     ] (DxvkContext* ctx) {
@@ -3456,11 +3490,16 @@ namespace dxvk {
         constantCount   = 0;
         constantBound   = 0;
       }
+
+      bool needsUpdate = Bindings[StartSlot + i].buffer != newBuffer;
+
+      if (needsUpdate)
+        Bindings[StartSlot + i].buffer = newBuffer;
+
+      needsUpdate |= Bindings[StartSlot + i].constantOffset != constantOffset
+                  || Bindings[StartSlot + i].constantCount  != constantCount;
       
-      if (Bindings[StartSlot + i].buffer         != newBuffer
-       || Bindings[StartSlot + i].constantOffset != constantOffset
-       || Bindings[StartSlot + i].constantCount  != constantCount) {
-        Bindings[StartSlot + i].buffer         = newBuffer;
+      if (needsUpdate) {
         Bindings[StartSlot + i].constantOffset = constantOffset;
         Bindings[StartSlot + i].constantCount  = constantCount;
         Bindings[StartSlot + i].constantBound  = constantBound;
