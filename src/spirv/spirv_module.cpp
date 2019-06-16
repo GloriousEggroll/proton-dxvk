@@ -342,6 +342,25 @@ namespace dxvk {
     
     return this->constComposite(vectorTypeId, args.size(), args.data());
   }
+
+
+  uint32_t SpirvModule::constfReplicant(
+          float                   replicant,
+          uint32_t                count) {
+    std::array<uint32_t, 4> args = {{
+      this->constf32(replicant), this->constf32(replicant),
+      this->constf32(replicant), this->constf32(replicant),
+    }};
+
+    // Can't make a scalar composite.
+    if (count == 1)
+      return args[0];
+    
+    uint32_t scalarTypeId = this->defFloatType(32);
+    uint32_t vectorTypeId = this->defVectorType(scalarTypeId, count);
+    
+    return this->constComposite(vectorTypeId, count, args.data());
+  }
   
   
   uint32_t SpirvModule::constComposite(
@@ -1623,6 +1642,25 @@ namespace dxvk {
     m_code.putWord(m_instExtGlsl450);
     m_code.putWord(spv::GLSLstd450FAbs);
     m_code.putWord(operand);
+    return resultId;
+  }
+
+
+  uint32_t SpirvModule::opFMix(
+          uint32_t                resultType,
+          uint32_t                x,
+          uint32_t                y,
+          uint32_t                a) {
+    uint32_t resultId = this->allocateId();
+    
+    m_code.putIns (spv::OpExtInst, 8);
+    m_code.putWord(resultType);
+    m_code.putWord(resultId);
+    m_code.putWord(m_instExtGlsl450);
+    m_code.putWord(spv::GLSLstd450FMix);
+    m_code.putWord(x);
+    m_code.putWord(y);
+    m_code.putWord(a);
     return resultId;
   }
   
@@ -3028,6 +3066,68 @@ namespace dxvk {
     m_code.putWord(sampledImage);
     m_code.putWord(coordinates);
     m_code.putWord(reference);
+    
+    putImageOperands(operands);
+    return resultId;
+  }
+
+
+  uint32_t SpirvModule::sampleGeneric(
+          bool                    projected,
+          uint32_t                resultType,
+          uint32_t                sampledImage,
+          uint32_t                coordinates,
+          uint32_t                reference,
+    const SpirvImageOperands&     operands) {
+    uint32_t resultId = this->allocateId();
+
+    const bool depthCompare = reference != 0;
+    const bool explicitLod  =
+       (operands.flags & spv::ImageOperandsLodMask)
+    || (operands.flags & spv::ImageOperandsGradMask);
+
+    uint32_t argCount = 5;
+    if (depthCompare)
+      argCount = 6;
+
+    spv::Op opcode;
+    if (projected) {
+      if (depthCompare) {
+        if (explicitLod)
+          opcode = spv::OpImageSampleProjDrefExplicitLod;
+        else
+          opcode = spv::OpImageSampleProjDrefImplicitLod;
+      }
+      else {
+        if (explicitLod)
+          opcode = spv::OpImageSampleProjExplicitLod;
+        else
+          opcode = spv::OpImageSampleProjImplicitLod;
+      }
+    }
+    else {
+      if (depthCompare) {
+        if (explicitLod)
+          opcode = spv::OpImageSampleDrefExplicitLod;
+        else
+          opcode = spv::OpImageSampleDrefImplicitLod;
+      }
+      else {
+        if (explicitLod)
+          opcode = spv::OpImageSampleExplicitLod;
+        else
+          opcode = spv::OpImageSampleImplicitLod;
+      }
+    }
+    
+    m_code.putIns(opcode,
+      argCount + getImageOperandWordCount(operands));
+    m_code.putWord(resultType);
+    m_code.putWord(resultId);
+    m_code.putWord(sampledImage);
+    m_code.putWord(coordinates);
+    if (depthCompare)
+      m_code.putWord(reference);
     
     putImageOperands(operands);
     return resultId;

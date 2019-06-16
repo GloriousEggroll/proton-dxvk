@@ -158,6 +158,10 @@ namespace dxvk {
             float                   y,
             float                   z,
             float                   w);
+
+    uint32_t constfReplicant(
+            float                   replicant,
+            uint32_t                count);
     
     uint32_t constComposite(
             uint32_t                typeId,
@@ -598,6 +602,12 @@ namespace dxvk {
     uint32_t opFAbs(
             uint32_t                resultType,
             uint32_t                operand);
+
+    uint32_t opFMix(
+            uint32_t                resultType,
+            uint32_t                x,
+            uint32_t                y,
+            uint32_t                a);
     
     uint32_t opIAdd(
             uint32_t                resultType,
@@ -1039,6 +1049,14 @@ namespace dxvk {
       const SpirvImageOperands&     operands);
 
     uint32_t opImageSampleProjDrefExplicitLod(
+            uint32_t                resultType,
+            uint32_t                sampledImage,
+            uint32_t                coordinates,
+            uint32_t                reference,
+      const SpirvImageOperands&     operands);
+
+    uint32_t sampleGeneric(
+            bool                    projected,
             uint32_t                resultType,
             uint32_t                sampledImage,
             uint32_t                coordinates,

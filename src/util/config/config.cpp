@@ -153,7 +153,32 @@ namespace dxvk {
     /* The Surge                                  */
     { "TheSurge.exe", {{
       { "d3d11.allowMapFlagNoWait",         "True" },
-    }} }
+    }} },
+
+    /**********************************************/
+    /* D3D9 GAMES                                 */
+    /**********************************************/
+
+    /* A Hat in Time                              */
+    { "HatinTimeGame.exe", {{
+      { "d3d9.strictPow",                   "False" },
+      { "d3d9.lenientClear",                "True" },
+    }} },
+    /* Risen                                      */
+    { "Risen.exe", {{
+      { "d3d9.allowLockFlagReadonly",       "False" },
+    }} },
+    /* Star Wars: The Force Unleashed 1 & 2       */
+    { "SWTFU.exe", {{
+      { "d3d9.hasHazards",                  "True" },
+    }} },
+    { "SWTFU2.exe", {{
+      { "d3d9.hasHazards",                  "True" },
+    }} },
+    /* Grand Theft Auto IV                        */
+    { "GTAIV.exe", {{
+      { "d3d9.hasHazards",                  "True" },
+    }} },
   }};
 
 
