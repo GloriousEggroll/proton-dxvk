@@ -16,9 +16,10 @@ namespace dxvk {
    * binding-related specialization constants in shaders.
    * \tparam N Number of binding slots
    */
-  class DxvkBindingMask {
+  template<uint32_t BindingCount>
+  class DxvkBindingSet {
     constexpr static uint32_t BitCount = 32;
-    constexpr static uint32_t IntCount = (MaxNumActiveBindings + BitCount - 1) / BitCount;
+    constexpr static uint32_t IntCount = (BindingCount + BitCount - 1) / BitCount;
   public:
     
     /**
@@ -27,7 +28,7 @@ namespace dxvk {
      * \param [in] slot The binding ID
      * \returns \c true if the binding is active
      */
-    bool isBound(uint32_t slot) const {
+    bool test(uint32_t slot) const {
       const uint32_t intId = slot / BitCount;
       const uint32_t bitId = slot % BitCount;
       const uint32_t bitMask = 1u << bitId;
@@ -40,7 +41,7 @@ namespace dxvk {
      * \param [in] slot The binding ID
      * \returns \c true if the state has changed
      */
-    bool setBound(uint32_t slot) {
+    bool set(uint32_t slot) {
       const uint32_t intId = slot / BitCount;
       const uint32_t bitId = slot % BitCount;
       const uint32_t bitMask = 1u << bitId;
@@ -56,7 +57,7 @@ namespace dxvk {
      * \param [in] slot The binding ID
      * \returns \c true if the state has changed
      */
-    bool setUnbound(uint32_t slot) {
+    bool clr(uint32_t slot) {
       const uint32_t intId = slot / BitCount;
       const uint32_t bitId = slot % BitCount;
       const uint32_t bitMask = 1u << bitId;
@@ -76,12 +77,36 @@ namespace dxvk {
       for (uint32_t i = 0; i < IntCount; i++)
         m_slots[i] = 0;
     }
+
+    /**
+     * \brief Enables multiple bindings
+     * \param [in] n Number of bindings
+     */
+    void setFirst(uint32_t n) {
+      for (uint32_t i = 0; i < IntCount; i++) {
+        m_slots[i] = n >= BitCount ? ~0u : ~(~0u << n);
+        n = n >= BitCount ? n - BitCount : 0;
+      }
+    }
+
+    bool operator == (const DxvkBindingSet& other) const {
+      bool eq = true;
+      for (uint32_t i = 0; i < IntCount; i++)
+        eq &= m_slots[i] == other.m_slots[i];
+      return eq;
+    }
+
+    bool operator != (const DxvkBindingSet& other) const {
+      return !this->operator == (other);
+    }
     
   private:
     
     uint32_t m_slots[IntCount];
     
   };
+
+  using DxvkBindingMask = DxvkBindingSet<MaxNumActiveBindings>;
   
   
   /**

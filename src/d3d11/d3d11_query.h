@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../dxvk/dxvk_event.h"
-#include "../dxvk/dxvk_query.h"
+#include "../dxvk/dxvk_gpu_event.h"
+#include "../dxvk/dxvk_gpu_query.h"
 
 #include "../d3d10/d3d10_query.h"
 
@@ -9,8 +9,15 @@
 
 namespace dxvk {
   
+  enum D3D11_VK_QUERY_STATE : uint32_t {
+    D3D11_VK_QUERY_INITIAL,
+    D3D11_VK_QUERY_BEGUN,
+    D3D11_VK_QUERY_ENDED,
+  };
+  
   class D3D11Query : public D3D11DeviceChild<ID3D11Predicate> {
-    
+    constexpr static uint32_t MaxGpuQueries = 2;
+    constexpr static uint32_t MaxGpuEvents  = 1;
   public:
     
     D3D11Query(
@@ -31,19 +38,32 @@ namespace dxvk {
     void STDMETHODCALLTYPE GetDesc(
             D3D11_QUERY_DESC *pDesc) final;
     
-    uint32_t Reset();
-    
-    bool HasBeginEnabled() const;
-    
-    void Begin(DxvkContext* ctx, uint32_t revision);
+    void Begin(DxvkContext* ctx);
     
     void End(DxvkContext* ctx);
-    
-    void Signal(DxvkContext* ctx, uint32_t revision);
     
     HRESULT STDMETHODCALLTYPE GetData(
             void*                             pData,
             UINT                              GetDataFlags);
+    
+    DxvkBufferSlice GetPredicate(DxvkContext* ctx);
+
+    bool IsEvent() const {
+      return m_desc.Query == D3D11_QUERY_EVENT;
+    }
+
+    bool IsStalling() const {
+      return m_stallFlag;
+    }
+
+    void NotifyEnd() {
+      m_stallMask <<= 1;
+    }
+
+    void NotifyStall() {
+      m_stallMask |= 1;
+      m_stallFlag |= bit::popcnt(m_stallMask) >= 16;
+    }
     
     D3D10Query* GetD3D10Iface() {
       return &m_d3d10;
@@ -53,13 +73,19 @@ namespace dxvk {
     
     D3D11Device* const m_device;
     D3D11_QUERY_DESC   m_desc;
+
+    D3D11_VK_QUERY_STATE m_state;
     
-    Rc<DxvkQuery> m_query = nullptr;
-    Rc<DxvkEvent> m_event = nullptr;
-    
-    uint32_t m_revision = 0;
+    std::array<Rc<DxvkGpuQuery>, MaxGpuQueries> m_query;
+    std::array<Rc<DxvkGpuEvent>, MaxGpuEvents>  m_event;
+
+    sync::Spinlock  m_predicateLock;
+    DxvkBufferSlice m_predicate;
 
     D3D10Query m_d3d10;
+
+    uint32_t m_stallMask = 0;
+    bool     m_stallFlag = false;
 
     UINT64 GetTimestampQueryFrequency() const;
     

@@ -10,11 +10,11 @@
 #include "dxvk_image.h"
 #include "dxvk_memory.h"
 #include "dxvk_meta_clear.h"
+#include "dxvk_objects.h"
 #include "dxvk_options.h"
 #include "dxvk_pipecache.h"
 #include "dxvk_pipemanager.h"
 #include "dxvk_queue.h"
-#include "dxvk_query_pool.h"
 #include "dxvk_recycler.h"
 #include "dxvk_renderpass.h"
 #include "dxvk_sampler.h"
@@ -35,6 +35,13 @@ namespace dxvk {
     uint32_t maxNumDynamicUniformBuffers = 0;
     uint32_t maxNumDynamicStorageBuffers = 0;
   };
+
+  /**
+   * \brief Device performance hints
+   */
+  struct DxvkDevicePerfHints {
+    VkBool32 preferFbDepthStencilCopy : 1;
+  };
   
   /**
    * \brief Device queue
@@ -43,8 +50,17 @@ namespace dxvk {
    * queue family that it belongs to.
    */
   struct DxvkDeviceQueue {
-    uint32_t  queueFamily = 0;
     VkQueue   queueHandle = VK_NULL_HANDLE;
+    uint32_t  queueFamily = 0;
+    uint32_t  queueIndex  = 0;
+  };
+
+  /**
+   * \brief Device queue infos
+   */
+  struct DxvkDeviceQueueSet {
+    DxvkDeviceQueue graphics;
+    DxvkDeviceQueue transfer;
   };
   
   /**
@@ -59,8 +75,6 @@ namespace dxvk {
     friend class DxvkContext;
     friend class DxvkSubmissionQueue;
     friend class DxvkDescriptorPoolTracker;
-    
-    constexpr static VkDeviceSize DefaultStagingBufferSize = 4 * 1024 * 1024;
   public:
     
     DxvkDevice(
@@ -105,14 +119,23 @@ namespace dxvk {
     }
     
     /**
-     * \brief Graphics queue properties
+     * \brief Queue handles
      * 
-     * Handle and queue family index of
-     * the queue used for rendering.
-     * \returns Graphics queue info
+     * Handles and queue family indices
+     * of all known device queues.
+     * \returns Device queue infos
      */
-    DxvkDeviceQueue graphicsQueue() const {
-      return m_graphicsQueue;
+    const DxvkDeviceQueueSet& queues() const {
+      return m_queues;
+    }
+
+    /**
+     * \brief Tests whether a dedicated transfer queue is available
+     * \returns \c true if an SDMA queue is supported by the device
+     */
+    bool hasDedicatedTransferQueue() const {
+      return m_queues.transfer.queueHandle
+          != m_queues.graphics.queueHandle;
     }
     
     /**
@@ -153,29 +176,14 @@ namespace dxvk {
      * \returns Device options
      */
     DxvkDeviceOptions options() const;
-    
+
     /**
-     * \brief Allocates a staging buffer
-     * 
-     * Returns a staging buffer that is at least as large
-     * as the requested size. It is usually bigger so that
-     * a single staging buffer may serve multiple allocations.
-     * \param [in] size Minimum buffer size
-     * \returns The staging buffer
+     * \brief Retrieves performance hints
+     * \returns Device-specific perf hints
      */
-    Rc<DxvkStagingBuffer> allocStagingBuffer(
-            VkDeviceSize size);
-    
-    /**
-     * \brief Recycles a staging buffer
-     * 
-     * When a staging buffer is no longer needed, it should
-     * be returned to the device so that it can be reused
-     * for subsequent allocations.
-     * \param [in] buffer The buffer
-     */
-    void recycleStagingBuffer(
-      const Rc<DxvkStagingBuffer>& buffer);
+    DxvkDevicePerfHints perfHints() const {
+      return m_perfHints;
+    }
     
     /**
      * \brief Creates a command list
@@ -201,6 +209,25 @@ namespace dxvk {
      * \returns The context object
      */
     Rc<DxvkContext> createContext();
+
+    /**
+     * \brief Creates a GPU event
+     * \returns New GPU event
+     */
+    Rc<DxvkGpuEvent> createGpuEvent();
+
+    /**
+     * \brief Creates a query
+     * 
+     * \param [in] type Query type
+     * \param [in] flags Query flags
+     * \param [in] index Query index
+     * \returns New query
+     */
+    Rc<DxvkGpuQuery> createGpuQuery(
+            VkQueryType           type,
+            VkQueryControlFlags   flags,
+            uint32_t              index);
     
     /**
      * \brief Creates framebuffer for a set of render targets
@@ -317,23 +344,26 @@ namespace dxvk {
     /**
      * \brief Presents a swap chain image
      * 
-     * Locks the device queues and invokes the
-     * presenter's \c presentImage method.
+     * Invokes the presenter's \c presentImage method on
+     * the submission thread. The status of this operation
+     * can be retrieved with \ref waitForSubmission.
      * \param [in] presenter The presenter
      * \param [in] semaphore Sync semaphore
+     * \param [out] status Present status
      */
-    VkResult presentImage(
+    void presentImage(
       const Rc<vk::Presenter>&        presenter,
-            VkSemaphore               semaphore);
+            VkSemaphore               semaphore,
+            DxvkSubmitStatus*         status);
     
     /**
      * \brief Submits a command list
      * 
-     * Synchronization arguments are optional. 
+     * Submits the given command list to the device using
+     * the given set of optional synchronization primitives.
      * \param [in] commandList The command list to submit
      * \param [in] waitSync (Optional) Semaphore to wait on
      * \param [in] wakeSync (Optional) Semaphore to notify
-     * \returns Synchronization fence
      */
     void submitCommandList(
       const Rc<DxvkCommandList>&      commandList,
@@ -348,7 +378,8 @@ namespace dxvk {
      * to lock the queue before submitting command buffers.
      */
     void lockSubmission() {
-      m_submissionLock.lock();
+      m_submissionQueue.synchronize();
+      m_submissionQueue.lockDeviceQueue();
     }
     
     /**
@@ -358,7 +389,7 @@ namespace dxvk {
      * itself can use them for submissions again.
      */
     void unlockSubmission() {
-      m_submissionLock.unlock();
+      m_submissionQueue.unlockDeviceQueue();
     }
 
     /**
@@ -371,6 +402,14 @@ namespace dxvk {
     uint32_t pendingSubmissions() const {
       return m_submissionQueue.pendingSubmissions();
     }
+
+    /**
+     * \brief Waits for a given submission
+     * 
+     * \param [in,out] status Submission status
+     * \returns Result of the submission
+     */
+    VkResult waitForSubmission(DxvkSubmitStatus* status);
     
     /**
      * \brief Waits until the device becomes idle
@@ -394,30 +433,22 @@ namespace dxvk {
     DxvkDeviceFeatures          m_features;
     VkPhysicalDeviceProperties  m_properties;
     
-    Rc<DxvkMemoryAllocator>     m_memory;
-    Rc<DxvkRenderPassPool>      m_renderPassPool;
-    Rc<DxvkPipelineManager>     m_pipelineManager;
+    DxvkDevicePerfHints         m_perfHints;
+    DxvkObjects                 m_objects;
 
-    Rc<DxvkMetaClearObjects>    m_metaClearObjects;
-    Rc<DxvkMetaCopyObjects>     m_metaCopyObjects;
-    Rc<DxvkMetaMipGenObjects>   m_metaMipGenObjects;
-    Rc<DxvkMetaPackObjects>     m_metaPackObjects;
-    Rc<DxvkMetaResolveObjects>  m_metaResolveObjects;
-    
-    DxvkUnboundResources        m_unboundResources;
-    
     sync::Spinlock              m_statLock;
     DxvkStatCounters            m_statCounters;
     
-    std::mutex                  m_submissionLock;
-    DxvkDeviceQueue             m_graphicsQueue;
-    DxvkDeviceQueue             m_presentQueue;
+    DxvkDeviceQueueSet          m_queues;
+
+    std::atomic<uint32_t>       m_numSamplers = { 0 };
     
     DxvkRecycler<DxvkCommandList,    16> m_recycledCommandLists;
     DxvkRecycler<DxvkDescriptorPool, 16> m_recycledDescriptorPools;
-    DxvkRecycler<DxvkStagingBuffer,   4> m_recycledStagingBuffers;
     
     DxvkSubmissionQueue m_submissionQueue;
+
+    DxvkDevicePerfHints getPerfHints();
     
     void recycleCommandList(
       const Rc<DxvkCommandList>& cmdList);
@@ -425,47 +456,9 @@ namespace dxvk {
     void recycleDescriptorPool(
       const Rc<DxvkDescriptorPool>& pool);
     
-    /**
-     * \brief Dummy buffer handle
-     * \returns Use for unbound vertex buffers.
-     */
-    VkBuffer dummyBufferHandle() const {
-      return m_unboundResources.bufferHandle();
-    }
-    
-    /**
-     * \brief Dummy buffer descriptor
-     * \returns Descriptor that points to a dummy buffer
-     */
-    VkDescriptorBufferInfo dummyBufferDescriptor() const {
-      return m_unboundResources.bufferDescriptor();
-    }
-    
-    /**
-     * \brief Dummy buffer view descriptor
-     * \returns Dummy buffer view handle
-     */
-    VkBufferView dummyBufferViewDescriptor() const {
-      return m_unboundResources.bufferViewDescriptor();
-    }
-    
-    /**
-     * \brief Dummy sampler descriptor
-     * \returns Descriptor that points to a dummy sampler
-     */
-    VkDescriptorImageInfo dummySamplerDescriptor() const {
-      return m_unboundResources.samplerDescriptor();
-    }
-    
-    /**
-     * \brief Dummy image view descriptor
-     * 
-     * \param [in] type Required view type
-     * \returns Descriptor that points to a dummy image
-     */
-    VkDescriptorImageInfo dummyImageViewDescriptor(VkImageViewType type) const {
-      return m_unboundResources.imageViewDescriptor(type);
-    }
+    DxvkDeviceQueue getQueue(
+            uint32_t                family,
+            uint32_t                index) const;
     
   };
   

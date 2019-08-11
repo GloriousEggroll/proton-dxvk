@@ -10,25 +10,32 @@ namespace dxvk {
   
   
   void DxvkDescriptorSlotMapping::defineSlot(
-          uint32_t              slot,
-          VkDescriptorType      type,
-          VkImageViewType       view,
           VkShaderStageFlagBits stage,
-          VkAccessFlags         access) {
-    uint32_t bindingId = this->getBindingId(slot);
+    const DxvkResourceSlot&     desc) {
+    uint32_t bindingId = this->getBindingId(desc.slot);
     
     if (bindingId != InvalidBinding) {
       m_descriptorSlots[bindingId].stages |= stage;
-      m_descriptorSlots[bindingId].access |= access;
+      m_descriptorSlots[bindingId].access |= desc.access;
     } else {
       DxvkDescriptorSlot slotInfo;
-      slotInfo.slot   = slot;
-      slotInfo.type   = type;
-      slotInfo.view   = view;
+      slotInfo.slot   = desc.slot;
+      slotInfo.type   = desc.type;
+      slotInfo.view   = desc.view;
       slotInfo.stages = stage;
-      slotInfo.access = access;
+      slotInfo.access = desc.access;
       m_descriptorSlots.push_back(slotInfo);
     }
+  }
+
+
+  void DxvkDescriptorSlotMapping::definePushConstRange(
+          VkShaderStageFlagBits stage,
+          uint32_t              offset,
+          uint32_t              size) {
+    m_pushConstRange.stageFlags |= stage;
+    m_pushConstRange.size = std::max(
+      m_pushConstRange.size, offset + size);
   }
   
   
@@ -79,10 +86,14 @@ namespace dxvk {
 
   DxvkPipelineLayout::DxvkPipelineLayout(
     const Rc<vk::DeviceFn>&   vkd,
-          uint32_t            bindingCount,
-    const DxvkDescriptorSlot* bindingInfos,
+    const DxvkDescriptorSlotMapping& slotMapping,
           VkPipelineBindPoint pipelineBindPoint)
-  : m_vkd(vkd), m_bindingSlots(bindingCount) {
+  : m_vkd           (vkd),
+    m_pushConstRange(slotMapping.pushConstRange()),
+    m_bindingSlots  (slotMapping.bindingCount()) {
+
+    auto bindingCount = slotMapping.bindingCount();
+    auto bindingInfos = slotMapping.bindingInfos();
     
     for (uint32_t i = 0; i < bindingCount; i++)
       m_bindingSlots[i] = bindingInfos[i];
@@ -135,6 +146,11 @@ namespace dxvk {
     pipeInfo.pSetLayouts            = &m_descriptorSetLayout;
     pipeInfo.pushConstantRangeCount = 0;
     pipeInfo.pPushConstantRanges    = nullptr;
+
+    if (m_pushConstRange.size) {
+      pipeInfo.pushConstantRangeCount = 1;
+      pipeInfo.pPushConstantRanges    = &m_pushConstRange;
+    }
     
     if (m_vkd->vkCreatePipelineLayout(m_vkd->device(),
         &pipeInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS) {

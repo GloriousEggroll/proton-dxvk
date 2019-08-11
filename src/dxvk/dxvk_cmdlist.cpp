@@ -3,13 +3,14 @@
 
 namespace dxvk {
     
-  DxvkCommandList::DxvkCommandList(
-          DxvkDevice*       device,
-          uint32_t          queueFamily)
-  : m_vkd           (device->vkd()),
+  DxvkCommandList::DxvkCommandList(DxvkDevice* device)
+  : m_device        (device),
+    m_vkd           (device->vkd()),
     m_cmdBuffersUsed(0),
-    m_descriptorPoolTracker(device),
-    m_stagingAlloc  (device) {
+    m_descriptorPoolTracker(device) {
+    const auto& graphicsQueue = m_device->queues().graphics;
+    const auto& transferQueue = m_device->queues().transfer;
+
     VkFenceCreateInfo fenceInfo;
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.pNext = nullptr;
@@ -22,59 +23,101 @@ namespace dxvk {
     poolInfo.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.pNext            = nullptr;
     poolInfo.flags            = 0;
-    poolInfo.queueFamilyIndex = queueFamily;
+    poolInfo.queueFamilyIndex = graphicsQueue.queueFamily;
     
-    if (m_vkd->vkCreateCommandPool(m_vkd->device(), &poolInfo, nullptr, &m_pool) != VK_SUCCESS)
-      throw DxvkError("DxvkCommandList: Failed to create command pool");
+    if (m_vkd->vkCreateCommandPool(m_vkd->device(), &poolInfo, nullptr, &m_graphicsPool) != VK_SUCCESS)
+      throw DxvkError("DxvkCommandList: Failed to create graphics command pool");
     
-    VkCommandBufferAllocateInfo cmdInfo;
-    cmdInfo.sType             = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cmdInfo.pNext             = nullptr;
-    cmdInfo.commandPool       = m_pool;
-    cmdInfo.level             = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmdInfo.commandBufferCount = 1;
+    if (m_device->hasDedicatedTransferQueue()) {
+      poolInfo.queueFamilyIndex = transferQueue.queueFamily;
+
+      if (m_vkd->vkCreateCommandPool(m_vkd->device(), &poolInfo, nullptr, &m_transferPool) != VK_SUCCESS)
+        throw DxvkError("DxvkCommandList: Failed to create transfer command pool");
+    }
     
-    if (m_vkd->vkAllocateCommandBuffers(m_vkd->device(), &cmdInfo, &m_execBuffer) != VK_SUCCESS
-     || m_vkd->vkAllocateCommandBuffers(m_vkd->device(), &cmdInfo, &m_initBuffer) != VK_SUCCESS)
+    VkCommandBufferAllocateInfo cmdInfoGfx;
+    cmdInfoGfx.sType             = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdInfoGfx.pNext             = nullptr;
+    cmdInfoGfx.commandPool       = m_graphicsPool;
+    cmdInfoGfx.level             = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdInfoGfx.commandBufferCount = 1;
+    
+    VkCommandBufferAllocateInfo cmdInfoDma;
+    cmdInfoDma.sType             = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdInfoDma.pNext             = nullptr;
+    cmdInfoDma.commandPool       = m_transferPool ? m_transferPool : m_graphicsPool;
+    cmdInfoDma.level             = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdInfoDma.commandBufferCount = 1;
+    
+    if (m_vkd->vkAllocateCommandBuffers(m_vkd->device(), &cmdInfoGfx, &m_execBuffer) != VK_SUCCESS
+     || m_vkd->vkAllocateCommandBuffers(m_vkd->device(), &cmdInfoGfx, &m_initBuffer) != VK_SUCCESS
+     || m_vkd->vkAllocateCommandBuffers(m_vkd->device(), &cmdInfoDma, &m_sdmaBuffer) != VK_SUCCESS)
       throw DxvkError("DxvkCommandList: Failed to allocate command buffer");
+    
+    if (m_device->hasDedicatedTransferQueue()) {
+      VkSemaphoreCreateInfo semInfo;
+      semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+      semInfo.pNext = nullptr;
+      semInfo.flags = 0;
+
+      if (m_vkd->vkCreateSemaphore(m_vkd->device(), &semInfo, nullptr, &m_sdmaSemaphore) != VK_SUCCESS)
+        throw DxvkError("DxvkCommandList: Failed to create semaphore");
+    }
   }
   
   
   DxvkCommandList::~DxvkCommandList() {
     this->reset();
+
+    m_vkd->vkDestroySemaphore(m_vkd->device(), m_sdmaSemaphore, nullptr);
     
-    m_vkd->vkDestroyCommandPool(m_vkd->device(), m_pool,  nullptr);
-    m_vkd->vkDestroyFence      (m_vkd->device(), m_fence, nullptr);
+    m_vkd->vkDestroyCommandPool(m_vkd->device(), m_graphicsPool, nullptr);
+    m_vkd->vkDestroyCommandPool(m_vkd->device(), m_transferPool, nullptr);
+    
+    m_vkd->vkDestroyFence(m_vkd->device(), m_fence, nullptr);
   }
   
   
   VkResult DxvkCommandList::submit(
-          VkQueue         queue,
           VkSemaphore     waitSemaphore,
           VkSemaphore     wakeSemaphore) {
-    std::array<VkCommandBuffer, 2> cmdBuffers;
-    uint32_t cmdBufferCount = 0;
+    const auto& graphics = m_device->queues().graphics;
+    const auto& transfer = m_device->queues().transfer;
+
+    DxvkQueueSubmission info = DxvkQueueSubmission();
+
+    if (m_cmdBuffersUsed.test(DxvkCmdBuffer::SdmaBuffer)) {
+      info.cmdBuffers[info.cmdBufferCount++] = m_sdmaBuffer;
+
+      if (m_device->hasDedicatedTransferQueue()) {
+        info.wakeSync[info.wakeCount++] = m_sdmaSemaphore;
+        VkResult status = submitToQueue(transfer.queueHandle, VK_NULL_HANDLE, info);
+
+        if (status != VK_SUCCESS)
+          return status;
+
+        info = DxvkQueueSubmission();
+        info.waitSync[info.waitCount] = m_sdmaSemaphore;
+        info.waitMask[info.waitCount] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        info.waitCount += 1;
+      }
+    }
+
+    if (m_cmdBuffersUsed.test(DxvkCmdBuffer::InitBuffer))
+      info.cmdBuffers[info.cmdBufferCount++] = m_initBuffer;
+    if (m_cmdBuffersUsed.test(DxvkCmdBuffer::ExecBuffer))
+      info.cmdBuffers[info.cmdBufferCount++] = m_execBuffer;
     
-    if (m_cmdBuffersUsed.test(DxvkCmdBufferFlag::InitBuffer))
-      cmdBuffers[cmdBufferCount++] = m_initBuffer;
-    if (m_cmdBuffersUsed.test(DxvkCmdBufferFlag::ExecBuffer))
-      cmdBuffers[cmdBufferCount++] = m_execBuffer;
+    if (waitSemaphore) {
+      info.waitSync[info.waitCount] = waitSemaphore;
+      info.waitMask[info.waitCount] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+      info.waitCount += 1;
+    }
+
+    if (wakeSemaphore)
+      info.wakeSync[info.wakeCount++] = wakeSemaphore;
     
-    const VkPipelineStageFlags waitStageMask
-      = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    
-    VkSubmitInfo info;
-    info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    info.pNext                = nullptr;
-    info.waitSemaphoreCount   = waitSemaphore == VK_NULL_HANDLE ? 0 : 1;
-    info.pWaitSemaphores      = &waitSemaphore;
-    info.pWaitDstStageMask    = &waitStageMask;
-    info.commandBufferCount   = cmdBufferCount;
-    info.pCommandBuffers      = cmdBuffers.data();
-    info.signalSemaphoreCount = wakeSemaphore == VK_NULL_HANDLE ? 0 : 1;
-    info.pSignalSemaphores    = &wakeSemaphore;
-    
-    return m_vkd->vkQueueSubmit(queue, 1, &info, m_fence);
+    return submitToQueue(graphics.queueHandle, m_fence, info);
   }
   
   
@@ -98,11 +141,13 @@ namespace dxvk {
     info.flags            = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     info.pInheritanceInfo = nullptr;
     
-    if (m_vkd->vkResetCommandPool(m_vkd->device(), m_pool, 0) != VK_SUCCESS)
+    if ((m_graphicsPool && m_vkd->vkResetCommandPool(m_vkd->device(), m_graphicsPool, 0) != VK_SUCCESS)
+     || (m_transferPool && m_vkd->vkResetCommandPool(m_vkd->device(), m_transferPool, 0) != VK_SUCCESS))
       Logger::err("DxvkCommandList: Failed to reset command buffer");
     
     if (m_vkd->vkBeginCommandBuffer(m_execBuffer, &info) != VK_SUCCESS
-     || m_vkd->vkBeginCommandBuffer(m_initBuffer, &info) != VK_SUCCESS)
+     || m_vkd->vkBeginCommandBuffer(m_initBuffer, &info) != VK_SUCCESS
+     || m_vkd->vkBeginCommandBuffer(m_sdmaBuffer, &info) != VK_SUCCESS)
       Logger::err("DxvkCommandList: Failed to begin command buffer");
     
     if (m_vkd->vkResetFences(m_vkd->device(), 1, &m_fence) != VK_SUCCESS)
@@ -110,56 +155,55 @@ namespace dxvk {
     
     // Unconditionally mark the exec buffer as used. There
     // is virtually no use case where this isn't correct.
-    m_cmdBuffersUsed.set(DxvkCmdBufferFlag::ExecBuffer);
+    m_cmdBuffersUsed = DxvkCmdBuffer::ExecBuffer;
   }
   
   
   void DxvkCommandList::endRecording() {
     if (m_vkd->vkEndCommandBuffer(m_execBuffer) != VK_SUCCESS
-     || m_vkd->vkEndCommandBuffer(m_initBuffer) != VK_SUCCESS)
+     || m_vkd->vkEndCommandBuffer(m_initBuffer) != VK_SUCCESS
+     || m_vkd->vkEndCommandBuffer(m_sdmaBuffer) != VK_SUCCESS)
       Logger::err("DxvkCommandList::endRecording: Failed to record command buffer");
   }
   
   
   void DxvkCommandList::reset() {
-    m_statCounters.reset();
-    m_bufferTracker.reset();
-    m_eventTracker.reset();
-    m_queryTracker.reset();
-    m_stagingAlloc.reset();
-    m_descriptorPoolTracker.reset();
+    // Signal resources and events to
+    // avoid stalling main thread
+    m_signalTracker.reset();
     m_resources.reset();
+
+    // Recycle heavy Vulkan objects
+    m_descriptorPoolTracker.reset();
+
+    // Return buffer memory slices
+    m_bufferTracker.reset();
+
+    // Return query and event handles
+    m_gpuQueryTracker.reset();
+    m_gpuEventTracker.reset();
+
+    // Less important stuff
+    m_statCounters.reset();
   }
-  
-  
-  DxvkStagingBufferSlice DxvkCommandList::stagedAlloc(VkDeviceSize size) {
-    return m_stagingAlloc.alloc(size);
-  }
-  
-  
-  void DxvkCommandList::stagedBufferCopy(
-          VkBuffer                dstBuffer,
-          VkDeviceSize            dstOffset,
-          VkDeviceSize            dataSize,
-    const DxvkStagingBufferSlice& dataSlice) {
-    VkBufferCopy region;
-    region.srcOffset = dataSlice.offset;
-    region.dstOffset = dstOffset;
-    region.size      = dataSize;
+
+
+  VkResult DxvkCommandList::submitToQueue(
+          VkQueue               queue,
+          VkFence               fence,
+    const DxvkQueueSubmission&  info) {
+    VkSubmitInfo submitInfo;
+    submitInfo.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pNext                = nullptr;
+    submitInfo.waitSemaphoreCount   = info.waitCount;
+    submitInfo.pWaitSemaphores      = info.waitSync;
+    submitInfo.pWaitDstStageMask    = info.waitMask;
+    submitInfo.commandBufferCount   = info.cmdBufferCount;
+    submitInfo.pCommandBuffers      = info.cmdBuffers;
+    submitInfo.signalSemaphoreCount = info.wakeCount;
+    submitInfo.pSignalSemaphores    = info.wakeSync;
     
-    m_vkd->vkCmdCopyBuffer(m_execBuffer,
-      dataSlice.buffer, dstBuffer, 1, &region);
-  }
-  
-  
-  void DxvkCommandList::stagedBufferImageCopy(
-          VkImage                 dstImage,
-          VkImageLayout           dstImageLayout,
-    const VkBufferImageCopy&      dstImageRegion,
-    const DxvkStagingBufferSlice& dataSlice) {
-    m_vkd->vkCmdCopyBufferToImage(m_execBuffer,
-      dataSlice.buffer, dstImage, dstImageLayout,
-      1, &dstImageRegion);
+    return m_vkd->vkQueueSubmit(queue, 1, &submitInfo, fence);
   }
   
 }

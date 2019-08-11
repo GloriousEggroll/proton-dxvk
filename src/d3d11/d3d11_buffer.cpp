@@ -11,6 +11,7 @@ namespace dxvk {
     const D3D11_BUFFER_DESC*          pDesc)
   : m_device      (pDevice),
     m_desc        (*pDesc),
+    m_resource    (this),
     m_d3d10       (this, pDevice->GetD3D10Interface()) {
     DxvkBufferCreateInfo  info;
     info.size   = pDesc->ByteWidth;
@@ -132,6 +133,14 @@ namespace dxvk {
       *ppvObject = ref(&m_d3d10);
       return S_OK;
     }
+
+    if (riid == __uuidof(IDXGIObject)
+     || riid == __uuidof(IDXGIDeviceSubObject)
+     || riid == __uuidof(IDXGIResource)
+     || riid == __uuidof(IDXGIResource1)) {
+       *ppvObject = ref(&m_resource);
+       return S_OK;
+    }
     
     Logger::warn("D3D11Buffer::QueryInterface: Unknown interface query");
     Logger::warn(str::format(riid));
@@ -186,6 +195,26 @@ namespace dxvk {
     VkFormatFeatureFlags features = GetBufferFormatFeatures(BindFlags);
 
     return CheckFormatFeatureSupport(viewFormat.Format, features);
+  }
+
+
+  HRESULT D3D11Buffer::ValidateBufferProperties(
+    const D3D11_BUFFER_DESC*      pDesc) {
+    // Zero-sized buffers are illegal
+    if (!pDesc->ByteWidth)
+      return E_INVALIDARG;
+
+    // Basic validation for structured buffers
+    if ((pDesc->MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)
+     && ((pDesc->StructureByteStride == 0)
+      || (pDesc->StructureByteStride & 0x3)))
+      return E_INVALIDARG;
+
+    // Mip generation obviously doesn't work for buffers
+    if (pDesc->MiscFlags & D3D11_RESOURCE_MISC_GENERATE_MIPS)
+      return E_INVALIDARG;
+    
+    return S_OK;
   }
 
 

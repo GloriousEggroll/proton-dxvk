@@ -33,7 +33,7 @@ export WINEPREFIX=/path/to/.wine-prefix
 - [wine 3.10](https://www.winehq.org/) or newer
 - [Meson](http://mesonbuild.com/) build system (at least version 0.43)
 - [MinGW64](http://mingw-w64.org/) 6.0 compiler and headers
-- [glslang](https://github.com/KhronosGroup/glslang) compile
+- [glslang](https://github.com/KhronosGroup/glslang) compiler
 
 ### Building DLLs
 
@@ -80,6 +80,7 @@ The `DXVK_HUD` environment variable controls a HUD which can display the framera
 - `drawcalls`: Shows the number of draw calls and render passes per frame.
 - `pipelines`: Shows the total number of graphics and compute pipelines.
 - `memory`: Shows the amount of device memory allocated and used.
+- `gpuload`: Shows estimated GPU load. May be inaccurate.
 - `version`: Shows DXVK version.
 - `api`: Shows the D3D feature level used by the application. Does not work correctly for D3D10 at the moment.
 

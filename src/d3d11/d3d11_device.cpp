@@ -18,6 +18,7 @@
 #include "d3d11_resource.h"
 #include "d3d11_sampler.h"
 #include "d3d11_shader.h"
+#include "d3d11_state_object.h"
 #include "d3d11_swapchain.h"
 #include "d3d11_texture.h"
 
@@ -39,12 +40,13 @@ namespace dxvk {
     m_d3d11Formats  (m_dxvkAdapter),
     m_d3d11Options  (m_dxvkAdapter->instance()->config()),
     m_dxbcOptions   (m_dxvkDevice, m_d3d11Options) {
-    m_initializer = new D3D11Initializer(m_dxvkDevice);
+    m_initializer = new D3D11Initializer(this);
     m_context     = new D3D11ImmediateContext(this, m_dxvkDevice);
     m_d3d10Device = new D3D10Device(this, m_context);
 
     m_uavCounters = CreateUAVCounterBuffer();
     m_xfbCounters = CreateXFBCounterBuffer();
+    m_predicates  = CreatePredicateBuffer();
   }
   
   
@@ -77,6 +79,9 @@ namespace dxvk {
     InitReturnPtr(ppBuffer);
     
     if (pDesc == nullptr)
+      return E_INVALIDARG;
+    
+    if (FAILED(D3D11Buffer::ValidateBufferProperties(pDesc)))
       return E_INVALIDARG;
 
     if (ppBuffer == nullptr)
@@ -990,8 +995,13 @@ namespace dxvk {
           ID3D11Predicate**           ppPredicate) {
     InitReturnPtr(ppPredicate);
     
-    if (pPredicateDesc == nullptr || pPredicateDesc->Query != D3D11_QUERY_OCCLUSION_PREDICATE)
+    if (pPredicateDesc == nullptr)
       return E_INVALIDARG;
+
+    if (pPredicateDesc->Query != D3D11_QUERY_OCCLUSION_PREDICATE) {
+      Logger::warn(str::format("D3D11: Unhandled predicate type: ", pPredicateDesc->Query));
+      return E_INVALIDARG;
+    }
     
     if (ppPredicate == nullptr)
       return S_FALSE;
@@ -1039,9 +1049,36 @@ namespace dxvk {
           D3D_FEATURE_LEVEL*          pChosenFeatureLevel, 
           ID3DDeviceContextState**    ppContextState) {
     InitReturnPtr(ppContextState);
+
+    if (!pFeatureLevels || FeatureLevels == 0)
+      return E_INVALIDARG;
     
-    Logger::err("D3D11Device::CreateDeviceContextState: Not implemented");
-    return E_NOTIMPL;
+    if (EmulatedInterface != __uuidof(ID3D10Device)
+     && EmulatedInterface != __uuidof(ID3D10Device1)
+     && EmulatedInterface != __uuidof(ID3D11Device)
+     && EmulatedInterface != __uuidof(ID3D11Device1))
+      return E_INVALIDARG;
+    
+    UINT flId;
+    for (flId = 0; flId < FeatureLevels; flId++) {
+      if (CheckFeatureLevelSupport(m_dxvkAdapter, pFeatureLevels[flId]))
+        break;
+    }
+
+    if (flId == FeatureLevels)
+      return E_INVALIDARG;
+
+    if (pFeatureLevels[flId] > m_featureLevel)
+      m_featureLevel = pFeatureLevels[flId];
+    
+    if (pChosenFeatureLevel)
+      *pChosenFeatureLevel = pFeatureLevels[flId];
+    
+    if (!ppContextState)
+      return S_FALSE;
+    
+    *ppContextState = ref(new D3D11DeviceContextState(this));
+    return S_OK;
   }
   
   HRESULT STDMETHODCALLTYPE D3D11Device::OpenSharedResource(
@@ -1094,12 +1131,10 @@ namespace dxvk {
     if (!pNumQualityLevels)
       return E_INVALIDARG;
     
-    *pNumQualityLevels = 0;
-    
     // For some reason, we can query DXGI_FORMAT_UNKNOWN
     if (Format == DXGI_FORMAT_UNKNOWN) {
       *pNumQualityLevels = SampleCount == 1 ? 1 : 0;
-      return SampleCount ? S_OK : E_INVALIDARG;
+      return SampleCount ? S_OK : E_FAIL;
     }
     
     // All other unknown formats should result in an error return.
@@ -1108,12 +1143,16 @@ namespace dxvk {
     if (format == VK_FORMAT_UNDEFINED)
       return E_INVALIDARG;
     
+    // Zero-init now, leave value undefined otherwise.
+    // This does actually match native D3D11 behaviour.
+    *pNumQualityLevels = 0;
+
     // Non-power of two sample counts are not supported, but querying
     // support for them is legal, so we return zero quality levels.
     VkSampleCountFlagBits sampleCountFlag = VK_SAMPLE_COUNT_1_BIT;
     
     if (FAILED(DecodeSampleCount(SampleCount, &sampleCountFlag)))
-      return SampleCount ? S_OK : E_INVALIDARG;
+      return SampleCount && SampleCount <= 32 ? S_OK : E_FAIL;
     
     // Check if the device supports the given combination of format
     // and sample count. D3D exposes the opaque concept of quality
@@ -1330,6 +1369,13 @@ namespace dxvk {
   }
   
   
+  DXGI_VK_FORMAT_INFO D3D11Device::LookupPackedFormat(
+          DXGI_FORMAT           Format,
+          DXGI_VK_FORMAT_MODE   Mode) const {
+    return m_d3d11Formats.GetPackedFormatInfo(Format, Mode);
+  }
+  
+  
   DXGI_VK_FORMAT_FAMILY D3D11Device::LookupFamily(
           DXGI_FORMAT           Format,
           DXGI_VK_FORMAT_MODE   Mode) const {
@@ -1366,11 +1412,15 @@ namespace dxvk {
     DxvkDeviceFeatures supported = adapter->features();
     DxvkDeviceFeatures enabled   = {};
 
-    // Geometry shaders are used for some meta ops
     enabled.core.features.geometryShader                          = VK_TRUE;
     enabled.core.features.robustBufferAccess                      = VK_TRUE;
+    enabled.core.features.shaderStorageImageExtendedFormats       = VK_TRUE;
+    enabled.core.features.shaderStorageImageWriteWithoutFormat    = VK_TRUE;
+    enabled.core.features.depthBounds                             = supported.core.features.depthBounds;
 
     enabled.extMemoryPriority.memoryPriority                      = supported.extMemoryPriority.memoryPriority;
+
+    enabled.extShaderDemoteToHelperInvocation.shaderDemoteToHelperInvocation  = supported.extShaderDemoteToHelperInvocation.shaderDemoteToHelperInvocation;
 
     enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor      = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor;
     enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor  = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor;
@@ -1386,6 +1436,7 @@ namespace dxvk {
       enabled.core.features.shaderCullDistance                    = VK_TRUE;
       enabled.core.features.textureCompressionBC                  = VK_TRUE;
       enabled.extDepthClipEnable.depthClipEnable                  = supported.extDepthClipEnable.depthClipEnable;
+      enabled.extHostQueryReset.hostQueryReset                    = supported.extHostQueryReset.hostQueryReset;
     }
     
     if (featureLevel >= D3D_FEATURE_LEVEL_9_2) {
@@ -1402,6 +1453,7 @@ namespace dxvk {
       enabled.core.features.logicOp                               = supported.core.features.logicOp;
       enabled.core.features.shaderImageGatherExtended             = VK_TRUE;
       enabled.core.features.variableMultisampleRate               = supported.core.features.variableMultisampleRate;
+      enabled.extConditionalRendering.conditionalRendering        = supported.extConditionalRendering.conditionalRendering;
       enabled.extTransformFeedback.transformFeedback              = supported.extTransformFeedback.transformFeedback;
       enabled.extTransformFeedback.geometryStreams                = supported.extTransformFeedback.geometryStreams;
     }
@@ -1417,7 +1469,6 @@ namespace dxvk {
       enabled.core.features.multiDrawIndirect                     = supported.core.features.multiDrawIndirect;
       enabled.core.features.shaderFloat64                         = supported.core.features.shaderFloat64;
       enabled.core.features.shaderInt64                           = supported.core.features.shaderInt64;
-      enabled.core.features.shaderStorageImageWriteWithoutFormat  = VK_TRUE;
       enabled.core.features.tessellationShader                    = VK_TRUE;
     }
     
@@ -1477,6 +1528,21 @@ namespace dxvk {
   }
   
   
+  Rc<D3D11CounterBuffer> D3D11Device::CreatePredicateBuffer() {
+    DxvkBufferCreateInfo predCounterInfo;
+    predCounterInfo.size   = 4096 * sizeof(uint32_t);
+    predCounterInfo.usage  = VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                           | VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
+    predCounterInfo.stages = VK_PIPELINE_STAGE_TRANSFER_BIT
+                           | VK_PIPELINE_STAGE_CONDITIONAL_RENDERING_BIT_EXT;
+    predCounterInfo.access = VK_ACCESS_TRANSFER_WRITE_BIT
+                           | VK_ACCESS_CONDITIONAL_RENDERING_READ_BIT_EXT;
+    
+    return new D3D11CounterBuffer(m_dxvkDevice,
+      predCounterInfo, sizeof(uint32_t));
+  }
+  
+  
   HRESULT D3D11Device::CreateShaderModule(
           D3D11CommonShader*      pShaderModule,
           DxvkShaderKey           ShaderKey,
@@ -1499,28 +1565,36 @@ namespace dxvk {
 
 
   HRESULT D3D11Device::GetFormatSupportFlags(DXGI_FORMAT Format, UINT* pFlags1, UINT* pFlags2) const {
-    // Query some general information from DXGI, DXVK and Vulkan about the format
     const DXGI_VK_FORMAT_INFO fmtMapping = LookupFormat(Format, DXGI_VK_FORMAT_MODE_ANY);
-    const VkFormatProperties  fmtSupport = m_dxvkAdapter->formatProperties(fmtMapping.Format);
-    const DxvkFormatInfo*     fmtProperties = imageFormatInfo(fmtMapping.Format);
-    
+
     // Reset output flags preemptively
     if (pFlags1 != nullptr) *pFlags1 = 0;
     if (pFlags2 != nullptr) *pFlags2 = 0;
-    
+
     // Unsupported or invalid format
-    if (fmtMapping.Format == VK_FORMAT_UNDEFINED)
-      return E_INVALIDARG;
+    if (Format != DXGI_FORMAT_UNKNOWN && fmtMapping.Format == VK_FORMAT_UNDEFINED)
+      return E_FAIL;
+    
+    // Query Vulkan format properties and supported features for it
+    const DxvkFormatInfo* fmtProperties = imageFormatInfo(fmtMapping.Format);
+
+    VkFormatProperties fmtSupport = fmtMapping.Format != VK_FORMAT_UNDEFINED
+      ? m_dxvkAdapter->formatProperties(fmtMapping.Format)
+      : VkFormatProperties();
+    
+    VkFormatFeatureFlags bufFeatures = fmtSupport.bufferFeatures;
+    VkFormatFeatureFlags imgFeatures = fmtSupport.optimalTilingFeatures | fmtSupport.linearTilingFeatures;
     
     UINT flags1 = 0;
     UINT flags2 = 0;
-    
+
     // Format can be used for shader resource views with buffers
-    if (fmtSupport.bufferFeatures & VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT)
+    if (bufFeatures & VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT
+     || Format == DXGI_FORMAT_UNKNOWN)
       flags1 |= D3D11_FORMAT_SUPPORT_BUFFER;
     
     // Format can be used for vertex data
-    if (fmtSupport.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)
+    if (bufFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)
       flags1 |= D3D11_FORMAT_SUPPORT_IA_VERTEX_BUFFER;
     
     // Format can be used for index data. Only
@@ -1546,8 +1620,8 @@ namespace dxvk {
      || Format == DXGI_FORMAT_R32G32B32A32_SINT)
       flags1 |= D3D11_FORMAT_SUPPORT_SO_BUFFER;
     
-    if (fmtSupport.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-     || fmtSupport.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) {
+    if (imgFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+     || imgFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) {
       const VkFormat depthFormat = LookupFormat(Format, DXGI_VK_FORMAT_MODE_DEPTH).Format;
       
       if (GetImageTypeSupport(fmtMapping.Format, VK_IMAGE_TYPE_1D)) flags1 |= D3D11_FORMAT_SUPPORT_TEXTURE1D;
@@ -1555,11 +1629,10 @@ namespace dxvk {
       if (GetImageTypeSupport(fmtMapping.Format, VK_IMAGE_TYPE_3D)) flags1 |= D3D11_FORMAT_SUPPORT_TEXTURE3D;
       
       flags1 |= D3D11_FORMAT_SUPPORT_MIP
-             |  D3D11_FORMAT_SUPPORT_CPU_LOCKABLE
              |  D3D11_FORMAT_SUPPORT_CAST_WITHIN_BIT_LAYOUT;
     
       // Format can be read 
-      if (fmtSupport.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) {
+      if (imgFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) {
         flags1 |= D3D11_FORMAT_SUPPORT_TEXTURECUBE
                |  D3D11_FORMAT_SUPPORT_SHADER_LOAD
                |  D3D11_FORMAT_SUPPORT_SHADER_GATHER
@@ -1572,7 +1645,7 @@ namespace dxvk {
       }
       
       // Format is a color format that can be used for rendering
-      if (fmtSupport.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) {
+      if (imgFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) {
         flags1 |= D3D11_FORMAT_SUPPORT_RENDER_TARGET
                |  D3D11_FORMAT_SUPPORT_MIP_AUTOGEN;
         
@@ -1581,11 +1654,11 @@ namespace dxvk {
       }
       
       // Format supports blending when used for rendering
-      if (fmtSupport.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)
+      if (imgFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)
         flags1 |= D3D11_FORMAT_SUPPORT_BLENDABLE;
       
       // Format is a depth-stencil format that can be used for rendering
-      if (fmtSupport.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+      if (imgFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
         flags1 |= D3D11_FORMAT_SUPPORT_DEPTH_STENCIL;
       
       // FIXME implement properly. This would require a VkSurface.
@@ -1616,8 +1689,8 @@ namespace dxvk {
     }
     
     // Format can be used for storage images or storage texel buffers
-    if ((fmtSupport.bufferFeatures & VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT)
-     && (fmtSupport.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+    if ((bufFeatures & VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT)
+     && (imgFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
       flags1 |= D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW;
       flags2 |= D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE;
       
@@ -1641,11 +1714,15 @@ namespace dxvk {
       if (Format == DXGI_FORMAT_R32_UINT)
         flags2 |= D3D11_FORMAT_SUPPORT2_UAV_ATOMIC_UNSIGNED_MIN_OR_MAX;
     }
+
+    // Mark everyting as CPU lockable
+    if (flags1 | flags2)
+      flags1 |= D3D11_FORMAT_SUPPORT_CPU_LOCKABLE;
     
     // Write back format support flags
     if (pFlags1 != nullptr) *pFlags1 = flags1;
     if (pFlags2 != nullptr) *pFlags2 = flags2;
-    return S_OK;
+    return (pFlags1 && flags1) || (pFlags2 && flags2) ? S_OK : E_FAIL;
   }
   
   
@@ -1655,6 +1732,12 @@ namespace dxvk {
     VkResult status = m_dxvkAdapter->imageFormatProperties(
       Format, Type, VK_IMAGE_TILING_OPTIMAL,
       VK_IMAGE_USAGE_SAMPLED_BIT, 0, props);
+    
+    if (status != VK_SUCCESS) {
+      status = m_dxvkAdapter->imageFormatProperties(
+        Format, Type, VK_IMAGE_TILING_LINEAR,
+        VK_IMAGE_USAGE_SAMPLED_BIT, 0, props);
+    }
     
     return status == VK_SUCCESS;
   }
@@ -1687,6 +1770,58 @@ namespace dxvk {
 
 
 
+  D3D11DeviceExt::D3D11DeviceExt(
+          D3D11DXGIDevice*        pContainer,
+          D3D11Device*            pDevice)
+  : m_container(pContainer), m_device(pDevice) {
+    
+  }
+  
+  
+  ULONG STDMETHODCALLTYPE D3D11DeviceExt::AddRef() {
+    return m_container->AddRef();
+  }
+  
+  
+  ULONG STDMETHODCALLTYPE D3D11DeviceExt::Release() {
+    return m_container->Release();
+  }
+  
+  
+  HRESULT STDMETHODCALLTYPE D3D11DeviceExt::QueryInterface(
+          REFIID                  riid,
+          void**                  ppvObject) {
+    return m_container->QueryInterface(riid, ppvObject);
+  }
+  
+  
+  BOOL STDMETHODCALLTYPE D3D11DeviceExt::GetExtensionSupport(
+          D3D11_VK_EXTENSION      Extension) {
+    const auto& deviceFeatures = m_device->GetDXVKDevice()->features();
+    const auto& deviceExtensions = m_device->GetDXVKDevice()->extensions();
+    
+    switch (Extension) {
+      case D3D11_VK_EXT_BARRIER_CONTROL:
+        return true;
+      
+      case D3D11_VK_EXT_MULTI_DRAW_INDIRECT:
+        return deviceFeatures.core.features.multiDrawIndirect;
+        
+      case D3D11_VK_EXT_MULTI_DRAW_INDIRECT_COUNT:
+        return deviceFeatures.core.features.multiDrawIndirect
+            && deviceExtensions.khrDrawIndirectCount;
+      
+      case D3D11_VK_EXT_DEPTH_BOUNDS:
+        return deviceFeatures.core.features.depthBounds;
+
+      default:
+        return false;
+    }
+  }
+  
+  
+  
+  
   WineDXGISwapChainFactory::WineDXGISwapChainFactory(
           D3D11DXGIDevice*        pContainer,
           D3D11Device*            pDevice)
@@ -1771,11 +1906,12 @@ namespace dxvk {
     m_dxvkAdapter   (pDxvkAdapter),
     m_dxvkDevice    (CreateDevice(FeatureLevel)),
     m_d3d11Device   (this, FeatureLevel, FeatureFlags),
+    m_d3d11DeviceExt(this, &m_d3d11Device),
     m_d3d11Interop  (this, &m_d3d11Device),
     m_wineFactory   (this, &m_d3d11Device),
     m_frameLatencyCap(m_d3d11Device.GetOptions()->maxFrameLatency) {
     for (uint32_t i = 0; i < m_frameEvents.size(); i++)
-      m_frameEvents[i] = new DxvkEvent();
+      m_frameEvents[i] = new sync::Signal(true);
   }
   
   
@@ -1814,6 +1950,11 @@ namespace dxvk {
     if (riid == __uuidof(ID3D11Device)
      || riid == __uuidof(ID3D11Device1)) {
       *ppvObject = ref(&m_d3d11Device);
+      return S_OK;
+    }
+    
+    if (riid == __uuidof(ID3D11VkExtDevice)) {
+      *ppvObject = ref(&m_d3d11DeviceExt);
       return S_OK;
     }
     
@@ -1909,6 +2050,9 @@ namespace dxvk {
   
   HRESULT STDMETHODCALLTYPE D3D11DXGIDevice::GetMaximumFrameLatency(
           UINT*                 pMaxLatency) {
+    if (!pMaxLatency)
+      return DXGI_ERROR_INVALID_CALL;
+    
     *pMaxLatency = m_frameLatency;
     return S_OK;
   }
@@ -1960,8 +2104,12 @@ namespace dxvk {
   }
   
   
-  Rc<DxvkEvent> STDMETHODCALLTYPE D3D11DXGIDevice::GetFrameSyncEvent() {
+  Rc<sync::Signal> STDMETHODCALLTYPE D3D11DXGIDevice::GetFrameSyncEvent(UINT BufferCount) {
     uint32_t frameLatency = m_frameLatency;
+    
+    if (BufferCount != 0
+     && BufferCount <= frameLatency)
+      frameLatency = BufferCount;
 
     if (m_frameLatencyCap != 0
      && m_frameLatencyCap <= frameLatency)

@@ -303,6 +303,10 @@ namespace dxvk {
             DXGI_FORMAT           Format,
             DXGI_VK_FORMAT_MODE   Mode) const;
     
+    DXGI_VK_FORMAT_INFO LookupPackedFormat(
+            DXGI_FORMAT           Format,
+            DXGI_VK_FORMAT_MODE   Mode) const;
+    
     DXGI_VK_FORMAT_FAMILY LookupFamily(
             DXGI_FORMAT           Format,
             DXGI_VK_FORMAT_MODE   Mode) const;
@@ -322,9 +326,11 @@ namespace dxvk {
     
     DxvkBufferSlice AllocUavCounterSlice() { return m_uavCounters->AllocSlice(); }
     DxvkBufferSlice AllocXfbCounterSlice() { return m_xfbCounters->AllocSlice(); }
+    DxvkBufferSlice AllocPredicateSlice () { return m_predicates ->AllocSlice(); }
     
     void FreeUavCounterSlice(const DxvkBufferSlice& Slice) { m_uavCounters->FreeSlice(Slice); }
     void FreeXfbCounterSlice(const DxvkBufferSlice& Slice) { m_xfbCounters->FreeSlice(Slice); }
+    void FreePredicateSlice (const DxvkBufferSlice& Slice) { m_predicates ->FreeSlice(Slice); }
     
     static bool CheckFeatureLevelSupport(
       const Rc<DxvkAdapter>&  adapter,
@@ -338,8 +344,8 @@ namespace dxvk {
     
     IDXGIObject*                    m_container;
 
-    const D3D_FEATURE_LEVEL         m_featureLevel;
-    const UINT                      m_featureFlags;
+    D3D_FEATURE_LEVEL               m_featureLevel;
+    UINT                            m_featureFlags;
     
     const Rc<DxvkDevice>            m_dxvkDevice;
     const Rc<DxvkAdapter>           m_dxvkAdapter;
@@ -356,6 +362,7 @@ namespace dxvk {
 
     Rc<D3D11CounterBuffer>          m_uavCounters;
     Rc<D3D11CounterBuffer>          m_xfbCounters;
+    Rc<D3D11CounterBuffer>          m_predicates;
     
     D3D11StateObjectSet<D3D11BlendState>        m_bsStateObjects;
     D3D11StateObjectSet<D3D11DepthStencilState> m_dsStateObjects;
@@ -365,6 +372,7 @@ namespace dxvk {
     
     Rc<D3D11CounterBuffer> CreateUAVCounterBuffer();
     Rc<D3D11CounterBuffer> CreateXFBCounterBuffer();
+    Rc<D3D11CounterBuffer> CreatePredicateBuffer();
 
     HRESULT CreateShaderModule(
             D3D11CommonShader*      pShaderModule,
@@ -385,6 +393,36 @@ namespace dxvk {
     
     static D3D_FEATURE_LEVEL GetMaxFeatureLevel(
       const Rc<DxvkAdapter>&        Adapter);
+    
+  };
+  
+  
+  /**
+   * \brief Extended D3D11 device
+   */
+  class D3D11DeviceExt : public ID3D11VkExtDevice {
+    
+  public:
+    
+    D3D11DeviceExt(
+            D3D11DXGIDevice*        pContainer,
+            D3D11Device*            pDevice);
+    
+    ULONG STDMETHODCALLTYPE AddRef();
+    
+    ULONG STDMETHODCALLTYPE Release();
+    
+    HRESULT STDMETHODCALLTYPE QueryInterface(
+            REFIID                  riid,
+            void**                  ppvObject);
+    
+    BOOL STDMETHODCALLTYPE GetExtensionSupport(
+            D3D11_VK_EXTENSION      Extension);
+    
+  private:
+    
+    D3D11DXGIDevice* m_container;
+    D3D11Device*     m_device;
     
   };
   
@@ -492,7 +530,8 @@ namespace dxvk {
     
     void STDMETHODCALLTYPE Trim() final;
     
-    Rc<DxvkEvent> STDMETHODCALLTYPE GetFrameSyncEvent();
+    Rc<sync::Signal> STDMETHODCALLTYPE GetFrameSyncEvent(
+            UINT                  BufferCount);
 
     Rc<DxvkDevice> STDMETHODCALLTYPE GetDXVKDevice();
 
@@ -504,6 +543,7 @@ namespace dxvk {
     Rc<DxvkDevice>      m_dxvkDevice;
 
     D3D11Device         m_d3d11Device;
+    D3D11DeviceExt      m_d3d11DeviceExt;
     D3D11VkInterop      m_d3d11Interop;
     
     WineDXGISwapChainFactory m_wineFactory;
@@ -512,7 +552,7 @@ namespace dxvk {
     uint32_t m_frameLatency    = DefaultFrameLatency;
     uint32_t m_frameId         = 0;
 
-    std::array<Rc<DxvkEvent>, 16> m_frameEvents;
+    std::array<Rc<sync::Signal>, 16> m_frameEvents;
 
     Rc<DxvkDevice> CreateDevice(D3D_FEATURE_LEVEL FeatureLevel);
 

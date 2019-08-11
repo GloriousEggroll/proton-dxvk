@@ -158,10 +158,7 @@ namespace dxvk {
     m_devProps        (device->adapter()->deviceProperties()),
     m_memProps        (device->adapter()->memoryProperties()) {
     for (uint32_t i = 0; i < m_memProps.memoryHeapCount; i++) {
-      VkDeviceSize heapSize = m_memProps.memoryHeaps[i].size;
-      
       m_memHeaps[i].properties = m_memProps.memoryHeaps[i];
-      m_memHeaps[i].chunkSize  = pickChunkSize(heapSize);
       m_memHeaps[i].stats      = DxvkMemoryStats { 0, 0 };
     }
     
@@ -170,6 +167,7 @@ namespace dxvk {
       m_memTypes[i].heapId     = m_memProps.memoryTypes[i].heapIndex;
       m_memTypes[i].memType    = m_memProps.memoryTypes[i];
       m_memTypes[i].memTypeId  = i;
+      m_memTypes[i].chunkSize  = pickChunkSize(i);
     }
   }
   
@@ -181,26 +179,52 @@ namespace dxvk {
   
   DxvkMemory DxvkMemoryAllocator::alloc(
     const VkMemoryRequirements*             req,
-    const VkMemoryDedicatedAllocateInfoKHR* dedAllocInfo,
+    const VkMemoryDedicatedRequirements&    dedAllocReq,
+    const VkMemoryDedicatedAllocateInfoKHR& dedAllocInfo,
           VkMemoryPropertyFlags             flags,
           float                             priority) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
+    // Try to allocate from a memory type which supports the given flags exactly
+    auto dedAllocPtr = dedAllocReq.prefersDedicatedAllocation ? &dedAllocInfo : nullptr;
+    DxvkMemory result = this->tryAlloc(req, dedAllocPtr, flags, priority);
+
+    // If the first attempt failed, try ignoring the dedicated allocation
+    if (!result && dedAllocPtr && !dedAllocReq.requiresDedicatedAllocation) {
+      result = this->tryAlloc(req, nullptr, flags, priority);
+      dedAllocPtr = nullptr;
+    }
+
+    // If that still didn't work, probe slower memory types as well
     VkMemoryPropertyFlags optFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
                                    | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
     
-    DxvkMemory result = this->tryAlloc(req, dedAllocInfo, flags, priority);
-
     if (!result && (flags & optFlags))
-      result = this->tryAlloc(req, dedAllocInfo, flags & ~optFlags, priority);
+      result = this->tryAlloc(req, dedAllocPtr, flags & ~optFlags, priority);
     
     if (!result) {
+      DxvkAdapterMemoryInfo memHeapInfo = m_device->adapter()->getMemoryHeapInfo();
+
       Logger::err(str::format(
         "DxvkMemoryAllocator: Memory allocation failed",
         "\n  Size:      ", req->size,
         "\n  Alignment: ", req->alignment,
         "\n  Mem flags: ", "0x", std::hex, flags,
         "\n  Mem types: ", "0x", std::hex, req->memoryTypeBits));
+
+      for (uint32_t i = 0; i < m_memProps.memoryHeapCount; i++) {
+        Logger::err(str::format("Heap ", i, ": ",
+          (m_memHeaps[i].stats.memoryAllocated >> 20), " MB allocated, ",
+          (m_memHeaps[i].stats.memoryUsed      >> 20), " MB used, ",
+          m_device->extensions().extMemoryBudget
+            ? str::format(
+                (memHeapInfo.heaps[i].memoryAllocated >> 20), " MB allocated (driver), ",
+                (memHeapInfo.heaps[i].memoryBudget    >> 20), " MB budget (driver), ",
+                (m_memHeaps[i].properties.size        >> 20), " MB total")
+            : str::format(
+                (m_memHeaps[i].properties.size        >> 20), " MB total")));
+      }
+
       throw DxvkError("DxvkMemoryAllocator: Memory allocation failed");
     }
     
@@ -258,7 +282,7 @@ namespace dxvk {
 
     DxvkMemory memory;
 
-    if ((size >= type->heap->chunkSize / 4) || dedAllocInfo) {
+    if (size >= type->chunkSize || dedAllocInfo) {
       DxvkDeviceMemory devMem = this->tryAllocDeviceMemory(
         type, flags, size, priority, dedAllocInfo);
 
@@ -269,16 +293,17 @@ namespace dxvk {
         memory = type->chunks[i]->alloc(flags, size, align, priority);
       
       if (!memory) {
-        DxvkDeviceMemory devMem = tryAllocDeviceMemory(
-          type, flags, type->heap->chunkSize, priority, nullptr);
-
-        if (devMem.memHandle == VK_NULL_HANDLE)
-          return DxvkMemory();
+        DxvkDeviceMemory devMem;
         
-        Rc<DxvkMemoryChunk> chunk = new DxvkMemoryChunk(this, type, devMem);
-        memory = chunk->alloc(flags, size, align, priority);
+        for (uint32_t i = 0; i < 6 && (type->chunkSize >> i) >= size && !devMem.memHandle; i++)
+          devMem = tryAllocDeviceMemory(type, flags, type->chunkSize >> i, priority, nullptr);
 
-        type->chunks.push_back(std::move(chunk));
+        if (devMem.memHandle) {
+          Rc<DxvkMemoryChunk> chunk = new DxvkMemoryChunk(this, type, devMem);
+          memory = chunk->alloc(flags, size, align, priority);
+
+          type->chunks.push_back(std::move(chunk));
+        }
       }
     }
 
@@ -322,6 +347,7 @@ namespace dxvk {
 
       if (status != VK_SUCCESS) {
         Logger::err(str::format("DxvkMemoryAllocator: Mapping memory failed with ", status));
+        m_vkd->vkFreeMemory(m_vkd->device(), result.memHandle, nullptr);
         return DxvkDeviceMemory();
       }
     }
@@ -371,14 +397,26 @@ namespace dxvk {
   }
 
 
-  VkDeviceSize DxvkMemoryAllocator::pickChunkSize(VkDeviceSize heapSize) const {
-    // Pick a reasonable chunk size depending on the memory
-    // heap size. Small chunk sizes can reduce fragmentation
-    // and are therefore preferred for small memory heaps.
-    constexpr VkDeviceSize MaxChunkSize  = 64 * 1024 * 1024;
-    constexpr VkDeviceSize MinChunkCount = 16;
+  VkDeviceSize DxvkMemoryAllocator::pickChunkSize(uint32_t memTypeId) const {
+    VkMemoryType type = m_memProps.memoryTypes[memTypeId];
+    VkMemoryHeap heap = m_memProps.memoryHeaps[type.heapIndex];
 
-    return std::min(heapSize / MinChunkCount, MaxChunkSize);
+    // Default to a chunk size of 128 MiB
+    VkDeviceSize chunkSize = 128 << 20;
+
+    // Try to waste a bit less system memory in 32-bit
+    // applications due to address space constraints
+    #ifndef _WIN64
+    if (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+      chunkSize = 32 << 20;
+    #endif
+
+    // Reduce the chunk size on small heaps so
+    // we can at least fit in 15 allocations
+    while (chunkSize * 15 > heap.size)
+      chunkSize >>= 1;
+
+    return chunkSize;
   }
   
 }

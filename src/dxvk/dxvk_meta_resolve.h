@@ -25,6 +25,27 @@ namespace dxvk {
   };
 
   /**
+   * \brief Copy pipeline key
+   * 
+   * Used to look up copy pipelines based
+   * on the copy operation they support.
+   */
+  struct DxvkMetaResolvePipelineKey {
+    VkFormat              format;
+    VkSampleCountFlagBits samples;
+
+    bool eq(const DxvkMetaResolvePipelineKey& other) const {
+      return this->format  == other.format
+          && this->samples == other.samples;
+    }
+
+    size_t hash() const {
+      return (uint32_t(format)  << 4)
+           ^ (uint32_t(samples) << 0);
+    }
+  };
+
+  /**
    * \brief Meta resolve render pass
    * 
    * Stores a framebuffer and image view objects
@@ -37,7 +58,8 @@ namespace dxvk {
     DxvkMetaResolveRenderPass(
       const Rc<vk::DeviceFn>&   vkd,
       const Rc<DxvkImageView>&  dstImageView,
-      const Rc<DxvkImageView>&  srcImageView);
+      const Rc<DxvkImageView>&  srcImageView,
+            bool                discardDst);
     
     ~DxvkMetaResolveRenderPass();
     
@@ -59,74 +81,77 @@ namespace dxvk {
     VkRenderPass  m_renderPass  = VK_NULL_HANDLE;
     VkFramebuffer m_framebuffer = VK_NULL_HANDLE;
 
-    VkRenderPass createRenderPass() const;
+    VkRenderPass createRenderPass(bool discard) const;
 
     VkFramebuffer createFramebuffer() const;
 
   };
-
+  
 
   /**
    * \brief Meta resolve objects
-   *
-   * Stores render pass objects and pipelines used
-   * for shader-based resolve operations. Due to
-   * the Vulkan design, we have to create one render
-   * pass and pipeline object per image format used.
+   * 
+   * Implements resolve operations in fragment
+   * shaders when using different formats.
    */
-  class DxvkMetaResolveObjects : public RcObject {
+  class DxvkMetaResolveObjects {
 
   public:
 
-    DxvkMetaResolveObjects(const Rc<vk::DeviceFn>& vkd);
+    DxvkMetaResolveObjects(const DxvkDevice* device);
     ~DxvkMetaResolveObjects();
 
     /**
-     * \brief Creates a resolve pipeline
+     * \brief Creates pipeline for meta copy operation
      * 
-     * \param [in] format Image view format
-     * \returns The pipeline handles to use
+     * \param [in] format Destination image format
+     * \param [in] samples Destination sample count
+     * \returns Compatible pipeline for the operation
      */
     DxvkMetaResolvePipeline getPipeline(
-            VkFormat            format);
+            VkFormat              format,
+            VkSampleCountFlagBits samples);
 
   private:
 
     Rc<vk::DeviceFn> m_vkd;
 
     VkSampler m_sampler;
-    
-    VkShaderModule m_shaderVert;
-    VkShaderModule m_shaderGeom;
-    VkShaderModule m_shaderFragF;
-    VkShaderModule m_shaderFragI;
-    VkShaderModule m_shaderFragU;
+
+    VkShaderModule m_shaderVert  = VK_NULL_HANDLE;
+    VkShaderModule m_shaderGeom  = VK_NULL_HANDLE;
+    VkShaderModule m_shaderFragF = VK_NULL_HANDLE;
+    VkShaderModule m_shaderFragU = VK_NULL_HANDLE;
+    VkShaderModule m_shaderFragI = VK_NULL_HANDLE;
 
     std::mutex m_mutex;
-    
-    std::unordered_map<VkFormat, DxvkMetaResolvePipeline> m_pipelines;
 
+    std::unordered_map<
+      DxvkMetaResolvePipelineKey,
+      DxvkMetaResolvePipeline,
+      DxvkHash, DxvkEq> m_pipelines;
+    
     VkSampler createSampler() const;
     
     VkShaderModule createShaderModule(
-      const SpirvCodeBuffer&      code) const;
+      const SpirvCodeBuffer&          code) const;
     
     DxvkMetaResolvePipeline createPipeline(
-            VkFormat              format);
+      const DxvkMetaResolvePipelineKey& key);
 
     VkRenderPass createRenderPass(
-            VkFormat              format) const;
+      const DxvkMetaResolvePipelineKey& key);
     
     VkDescriptorSetLayout createDescriptorSetLayout() const;
     
     VkPipelineLayout createPipelineLayout(
-            VkDescriptorSetLayout descriptorSetLayout) const;
+            VkDescriptorSetLayout  descriptorSetLayout) const;
     
-    VkPipeline createPipeline(
-            VkPipelineLayout      pipelineLayout,
-            VkRenderPass          renderPass,
-            VkFormat              format) const;
-
+    VkPipeline createPipelineObject(
+      const DxvkMetaResolvePipelineKey& key,
+            VkPipelineLayout       pipelineLayout,
+            VkRenderPass           renderPass);
+    
   };
-  
+
 }

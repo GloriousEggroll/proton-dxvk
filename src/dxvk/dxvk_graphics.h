@@ -29,6 +29,18 @@ namespace dxvk {
 
 
   /**
+   * \brief Shaders used in graphics pipelines
+   */
+  struct DxvkGraphicsPipelineShaders {
+    Rc<DxvkShader> vs;
+    Rc<DxvkShader> tcs;
+    Rc<DxvkShader> tes;
+    Rc<DxvkShader> gs;
+    Rc<DxvkShader> fs;
+  };
+
+
+  /**
    * \brief Graphics pipeline state info
    * 
    * Stores all information that is required to create
@@ -53,6 +65,10 @@ namespace dxvk {
 
     bool useDynamicDepthBias() const {
       return rsDepthBiasEnable;
+    }
+
+    bool useDynamicDepthBounds() const {
+      return dsEnableDepthBoundsTest;
     }
 
     bool useDynamicBlendConstants() const {
@@ -92,10 +108,10 @@ namespace dxvk {
     VkSampleCountFlags                  msSampleCount;
     uint32_t                            msSampleMask;
     VkBool32                            msEnableAlphaToCoverage;
-    VkBool32                            msEnableAlphaToOne;
     
     VkBool32                            dsEnableDepthTest;
     VkBool32                            dsEnableDepthWrite;
+    VkBool32                            dsEnableDepthBoundsTest;
     VkBool32                            dsEnableStencilTest;
     VkCompareOp                         dsDepthCompareOp;
     VkStencilOpState                    dsStencilOpFront;
@@ -105,6 +121,8 @@ namespace dxvk {
     VkLogicOp                           omLogicOp;
     VkPipelineColorBlendAttachmentState omBlendAttachments[MaxNumRenderTargets];
     VkComponentMapping                  omComponentMapping[MaxNumRenderTargets];
+
+    uint32_t                            scSpecConstants[MaxNumSpecConstants];
   };
   
   
@@ -130,10 +148,14 @@ namespace dxvk {
 
   public:
 
-    DxvkGraphicsPipelineInstance() { }
+    DxvkGraphicsPipelineInstance()
+    : m_stateVector (),
+      m_renderPass  (VK_NULL_HANDLE),
+      m_pipeline    (VK_NULL_HANDLE) { }
+
     DxvkGraphicsPipelineInstance(
       const DxvkGraphicsPipelineStateInfo&  state,
-            VkRenderPass                    rp,
+      const DxvkRenderPass*                 rp,
             VkPipeline                      pipe)
     : m_stateVector (state),
       m_renderPass  (rp),
@@ -148,9 +170,9 @@ namespace dxvk {
      */
     bool isCompatible(
       const DxvkGraphicsPipelineStateInfo&  state,
-            VkRenderPass                    rp) const {
-      return m_stateVector == state
-          && m_renderPass  == rp;
+      const DxvkRenderPass*                 rp) {
+      return m_renderPass  == rp
+          && m_stateVector == state;
     }
 
     /**
@@ -164,7 +186,7 @@ namespace dxvk {
   private:
 
     DxvkGraphicsPipelineStateInfo m_stateVector;
-    VkRenderPass                  m_renderPass;
+    const DxvkRenderPass*         m_renderPass;
     VkPipeline                    m_pipeline;
 
   };
@@ -177,17 +199,14 @@ namespace dxvk {
    * recompile the graphics pipeline against a given
    * pipeline state vector.
    */
-  class DxvkGraphicsPipeline : public DxvkResource {
+  class DxvkGraphicsPipeline {
     
   public:
     
     DxvkGraphicsPipeline(
-            DxvkPipelineManager*      pipeMgr,
-      const Rc<DxvkShader>&           vs,
-      const Rc<DxvkShader>&           tcs,
-      const Rc<DxvkShader>&           tes,
-      const Rc<DxvkShader>&           gs,
-      const Rc<DxvkShader>&           fs);
+            DxvkPipelineManager*        pipeMgr,
+            DxvkGraphicsPipelineShaders shaders);
+
     ~DxvkGraphicsPipeline();
     
     /**
@@ -232,26 +251,29 @@ namespace dxvk {
      */
     VkPipeline getPipelineHandle(
       const DxvkGraphicsPipelineStateInfo&    state,
-      const DxvkRenderPass&                   renderPass);
+      const DxvkRenderPass*                   renderPass);
+    
+    /**
+     * \brief Compiles a pipeline
+     * 
+     * Asynchronously compiles the given pipeline
+     * and stores the result for future use.
+     * \param [in] state Pipeline state vector
+     * \param [in] renderPass The render pass
+     */
+    void compilePipeline(
+      const DxvkGraphicsPipelineStateInfo&    state,
+      const DxvkRenderPass*                   renderPass);
     
   private:
     
-    struct PipelineStruct {
-      DxvkGraphicsPipelineStateInfo stateVector;
-      VkRenderPass                  renderPass;
-      VkPipeline                    pipeline;
-    };
-    
-    Rc<vk::DeviceFn>        m_vkd;
-    DxvkPipelineManager*    m_pipeMgr;
+    Rc<vk::DeviceFn>            m_vkd;
+    DxvkPipelineManager*        m_pipeMgr;
 
-    Rc<DxvkPipelineLayout>  m_layout;
-    Rc<DxvkShaderModule>    m_vs;
-    Rc<DxvkShaderModule>    m_tcs;
-    Rc<DxvkShaderModule>    m_tes;
-    Rc<DxvkShaderModule>    m_gs;
-    Rc<DxvkShaderModule>    m_fs;
-    Rc<DxvkShaderModule>    m_fs2;
+    DxvkGraphicsPipelineShaders m_shaders;
+    DxvkDescriptorSlotMapping   m_slotMapping;
+
+    Rc<DxvkPipelineLayout>      m_layout;
     
     uint32_t m_vsIn  = 0;
     uint32_t m_fsOut = 0;
@@ -263,20 +285,24 @@ namespace dxvk {
     alignas(CACHE_LINE_SIZE) sync::Spinlock   m_mutex;
     std::vector<DxvkGraphicsPipelineInstance> m_pipelines;
     
-    // Pipeline handles used for derivative pipelines
-    VkPipeline m_basePipeline = VK_NULL_HANDLE;
-    
-    const DxvkGraphicsPipelineInstance* findInstance(
+    DxvkGraphicsPipelineInstance* createInstance(
       const DxvkGraphicsPipelineStateInfo& state,
-            VkRenderPass                   renderPass) const;
+      const DxvkRenderPass*                renderPass);
     
-    VkPipeline compilePipeline(
+    DxvkGraphicsPipelineInstance* findInstance(
       const DxvkGraphicsPipelineStateInfo& state,
-            VkRenderPass                   renderPass,
-            VkPipeline                     baseHandle) const;
+      const DxvkRenderPass*                renderPass);
+    
+    VkPipeline createPipeline(
+      const DxvkGraphicsPipelineStateInfo& state,
+      const DxvkRenderPass*                renderPass) const;
     
     void destroyPipeline(
             VkPipeline                     pipeline) const;
+    
+    DxvkShaderModule createShaderModule(
+      const Rc<DxvkShader>&                shader,
+      const DxvkShaderModuleCreateInfo&    info) const;
     
     bool validatePipelineState(
       const DxvkGraphicsPipelineStateInfo& state) const;

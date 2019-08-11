@@ -190,11 +190,7 @@ namespace dxvk {
      * \returns Size of that level
      */
     VkExtent3D mipLevelExtent(uint32_t level) const {
-      VkExtent3D size = m_info.extent;
-      size.width  = std::max(1u, size.width  >> level);
-      size.height = std::max(1u, size.height >> level);
-      size.depth  = std::max(1u, size.depth  >> level);
-      return size;
+      return util::computeMipLevelExtent(m_info.extent, level);
     }
     
     /**
@@ -228,6 +224,14 @@ namespace dxvk {
     }
 
     /**
+     * \brief Changes image layout
+     * \param [in] layout New layout
+     */
+    void setLayout(VkImageLayout layout) {
+      m_info.layout = layout;
+    }
+
+    /**
      * \brief Checks whether a subresource is entirely covered
      * 
      * This can be used to determine whether an image can or
@@ -255,6 +259,15 @@ namespace dxvk {
       for (uint32_t i = 0; i < m_viewFormats.size() && !result; i++)
         result |= m_viewFormats[i] == format;
       return result;
+    }
+
+    /**
+     * \brief Memory size
+     * 
+     * \returns The memory size of the image
+     */
+    VkDeviceSize memSize() const {
+      return m_memory.length();
     }
     
   private:
@@ -305,6 +318,8 @@ namespace dxvk {
      * \returns The image view handle
      */
     VkImageView handle(VkImageViewType viewType) const {
+      if (unlikely(viewType == VK_IMAGE_VIEW_TYPE_MAX_ENUM))
+        viewType = m_info.type;
       return m_views[viewType];
     }
     
@@ -344,19 +359,19 @@ namespace dxvk {
     }
     
     /**
-     * \brief Image format info
-     * \returns Image format info
-     */
-    const DxvkFormatInfo* formatInfo() const {
-      return m_image->formatInfo();
-    }
-    
-    /**
      * \brief Image object
      * \returns Image object
      */
     const Rc<DxvkImage>& image() const {
       return m_image;
+    }
+    
+    /**
+     * \brief View format info
+     * \returns View format info
+     */
+    const DxvkFormatInfo* formatInfo() const {
+      return imageFormatInfo(m_info.format);
     }
     
     /**
@@ -372,8 +387,12 @@ namespace dxvk {
     }
     
     /**
-     * \brief Subresource range
-     * \returns Subresource range
+     * \brief View subresource range
+     *
+     * Returns the subresource range from the image
+     * description. For 2D views of 3D images, this
+     * will return the viewed 3D slices.
+     * \returns View subresource range
      */
     VkImageSubresourceRange subresources() const {
       VkImageSubresourceRange result;
@@ -382,6 +401,29 @@ namespace dxvk {
       result.levelCount     = m_info.numLevels;
       result.baseArrayLayer = m_info.minLayer;
       result.layerCount     = m_info.numLayers;
+      return result;
+    }
+
+    /**
+     * \brief Actual image subresource range
+     *
+     * Handles 3D images correctly in that it only
+     * returns one single array layer. Use this for
+     * barriers.
+     * \returns Image subresource range
+     */
+    VkImageSubresourceRange imageSubresources() const {
+      VkImageSubresourceRange result;
+      result.aspectMask     = m_info.aspect;
+      result.baseMipLevel   = m_info.minLevel;
+      result.levelCount     = m_info.numLevels;
+      if (likely(m_image->info().type != VK_IMAGE_TYPE_3D)) {
+        result.baseArrayLayer = m_info.minLayer;
+        result.layerCount     = m_info.numLayers;
+      } else {
+        result.baseArrayLayer = 0;
+        result.layerCount     = 1;
+      }
       return result;
     }
     

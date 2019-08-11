@@ -5,6 +5,8 @@
 #include "dxvk_sampler.h"
 
 namespace dxvk {
+
+  class DxvkContext;
   
   /**
    * \brief Unbound resources
@@ -75,6 +77,23 @@ namespace dxvk {
       result.sampler     = m_sampler->handle();
       result.imageView   = VK_NULL_HANDLE;
       result.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      return result;
+    }
+    
+    /**
+     * \brief Dummy combined image sampler descriptor
+     * 
+     * Contains both an image view and a sampler
+     * descriptor for the given image view type.
+     * \returns Dummy image view descriptor
+     */
+    VkDescriptorImageInfo imageSamplerDescriptor(VkImageViewType type) const {
+      auto view = getImageView(type);
+      
+      VkDescriptorImageInfo result;
+      result.sampler     = m_sampler->handle();
+      result.imageView   = view->handle();
+      result.imageLayout = view->imageInfo().layout;
       return result;
     }
     

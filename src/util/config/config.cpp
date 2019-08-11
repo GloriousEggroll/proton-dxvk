@@ -47,17 +47,17 @@ namespace dxvk {
     }} },
     /* Far Cry 3: Assumes clear(0.5) on an UNORM  *
      * format to result in 128 on AMD and 127 on  *
-     * Nvidia. Most Vulkan drivers clear to 127,  *
-     * assuming higher values causes artifacts.   */
+     * Nvidia. We assume that the Vulkan drivers  *
+     * match the clear behaviour of D3D11.        */
     { "farcry3_d3d11.exe", {{
-      { "dxgi.customVendorId",              "10de" },
+      { "dxgi.nvapiHack",                   "False" },
     }} },
     { "fc3_blooddragon_d3d11.exe", {{
-      { "dxgi.customVendorId",              "10de" },
+      { "dxgi.nvapiHack",                   "False" },
     }} },
     /* Far Cry 4: Same as Far Cry 3               */
     { "FarCry4.exe", {{
-      { "dxgi.customVendorId",              "10de" },
+      { "dxgi.nvapiHack",                   "False" },
     }} },
     /* Far Cry 5: Avoid CPU <-> GPU sync          */
     { "FarCry5.exe", {{
@@ -122,6 +122,14 @@ namespace dxvk {
     { "MassEffectAndromeda.exe", {{
       { "dxgi.nvapiHack",                   "False" },
     }} },
+    /* Mirror`s Edge Catalyst: Crashes on AMD     */
+    { "MirrorsEdgeCatalyst.exe", {{
+      { "dxgi.customVendorId",              "10de" },
+    }} },
+    /* Mirror`s Edge Catalyst Trial               */
+    { "MirrorsEdgeCatalystTrial.exe", {{
+      { "dxgi.customVendorId",              "10de" },
+    }} },
     /* Star Wars Battlefront (2015)               */
     { "starwarsbattlefront.exe", {{
       { "dxgi.nvapiHack",                   "False" },
@@ -138,6 +146,82 @@ namespace dxvk {
     { "Grim Dawn.exe", {{
       { "d3d11.constantBufferRangeCheck",   "True" },
     }} },
+    /* NieR:Automata                              */
+    { "NieRAutomata.exe", {{
+      { "d3d11.constantBufferRangeCheck",   "True" },
+    }} },
+    /* The Surge                                  */
+    { "TheSurge.exe", {{
+      { "d3d11.allowMapFlagNoWait",         "True" },
+    }} },
+    /* SteamVR performance test                   */
+    { "vr.exe", {{
+      { "d3d11.dcSingleUseMode",            "False" },
+    }} },
+    /**********************************************/
+    /* D3D9 GAMES                                 */
+    /**********************************************/
+
+    /* A Hat in Time                              */
+    { "HatinTimeGame.exe", {{
+      { "d3d9.strictPow",                   "False" },
+      { "d3d9.lenientClear",                "True" },
+    }} },
+    /* Borderlands: The Pre Sequel!               */
+    { "BorderlandsPreSequel.exe", {{
+      { "d3d9.lenientClear",                "True" },
+    }} },
+    /* Borderlands 2                              */
+    { "Borderlands2.exe", {{
+      { "d3d9.lenientClear",                "True" },
+    }} },
+    /* Borderlands                                */
+    { "Borderlands.exe", {{
+      { "d3d9.lenientClear",                "True" },
+    }} },
+    /* Gothic 3                                   */
+    { "Gothic3.exe", {{
+      { "d3d9.allowLockFlagReadonly",       "False" },
+    }} },
+    /* Gothic 3 Forsaken Gods                     */
+    { "Gothic III Forsaken Gods.exe", {{
+      { "d3d9.allowLockFlagReadonly",       "False" },
+    }} },
+    /* Risen                                      */
+    { "Risen.exe", {{
+      { "d3d9.allowLockFlagReadonly",       "False" },
+    }} },
+    /* Risen 2                                    */
+    { "Risen2.exe", {{
+      { "d3d9.allowLockFlagReadonly",       "False" },
+    }} },
+    /* Risen 3                                    */
+    { "Risen3.exe", {{
+      { "d3d9.allowLockFlagReadonly",       "False" },
+    }} },
+    /* Star Wars: The Force Unleashed 1 & 2       */
+    { "SWTFU.exe", {{
+      { "d3d9.hasHazards",                  "True" },
+    }} },
+    { "SWTFU2.exe", {{
+      { "d3d9.hasHazards",                  "True" },
+    }} },
+    /* Grand Theft Auto IV                        */
+    { "GTAIV.exe", {{
+      { "d3d9.hasHazards",                  "True" },
+    }} },
+    /* Deadlight                                  */
+    { "LOTDGame.exe", {{
+      { "d3d9.hasHazards",                  "True" },
+    }} },
+    /* Nostale                                    */
+    { "NostaleClientX.exe", {{
+      { "d3d9.allowLockFlagReadonly",       "False" },
+    }} },
+    /* GTA Episodes from Liberty City             */
+    { "EFLC.exe", {{
+      { "d3d9.hasHazards",                  "True" },
+    }} }
   }};
 
 
@@ -161,26 +245,46 @@ namespace dxvk {
   }
 
 
-  static void parseUserConfigLine(Config& config, const std::string& line) {
+  struct ConfigContext {
+    bool active;
+  };
+
+
+  static void parseUserConfigLine(Config& config, ConfigContext& ctx, const std::string& line) {
     std::stringstream key;
     std::stringstream value;
 
     // Extract the key
     size_t n = skipWhitespace(line, 0);
-    while (n < line.size() && isValidKeyChar(line[n]))
-      key << line[n++];
-    
-    // Check whether the next char is a '='
-    n = skipWhitespace(line, n);
-    if (n >= line.size() || line[n] != '=')
-      return;
 
-    // Extract the value
-    n = skipWhitespace(line, n + 1);
-    while (n < line.size() && !isWhitespace(line[n]))
-      value << line[n++];
-    
-    config.setOption(key.str(), value.str());
+    if (n < line.size() && line[n] == '[') {
+      n += 1;
+
+      size_t e = line.size() - 1;
+      while (e > n && line[e] != ']')
+        e -= 1;
+
+      while (n < e)
+        key << line[n++];
+      
+      ctx.active = key.str() == env::getExeName();
+    } else {
+      while (n < line.size() && isValidKeyChar(line[n]))
+        key << line[n++];
+      
+      // Check whether the next char is a '='
+      n = skipWhitespace(line, n);
+      if (n >= line.size() || line[n] != '=')
+        return;
+
+      // Extract the value
+      n = skipWhitespace(line, n + 1);
+      while (n < line.size() && !isWhitespace(line[n]))
+        value << line[n++];
+      
+      if (ctx.active)
+        config.setOption(key.str(), value.str());
+    }
   }
 
 
@@ -264,6 +368,29 @@ namespace dxvk {
     result = sign * intval;
     return true;
   }
+
+
+  bool Config::parseOptionValue(
+    const std::string&  value,
+          uint32_t&     result) {
+    if (value.size() == 0)
+      return false;
+
+    // Parse absolute number
+    uint32_t uintval = 0;
+
+    for (size_t i = 0; i < value.size(); i++) {
+      if (value[i] < '0' || value[i] > '9')
+        return false;
+      
+      uintval *= 10;
+      uintval += value[i] - '0';
+    }
+
+    // Return result
+    result = uintval;
+    return true;
+  }
   
   
   bool Config::parseOptionValue(
@@ -316,11 +443,15 @@ namespace dxvk {
     // help when debugging configuration issues
     Logger::info(str::format("Found config file: ", filePath));
 
+    // Initialize parser context
+    ConfigContext ctx;
+    ctx.active = true;
+
     // Parse the file line by line
     std::string line;
 
     while (std::getline(stream, line))
-      parseUserConfigLine(config, line);
+      parseUserConfigLine(config, ctx, line);
     
     return config;
   }

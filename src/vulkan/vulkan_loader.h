@@ -273,6 +273,11 @@ namespace dxvk::vk {
     VULKAN_FN(vkUpdateDescriptorSetWithTemplateKHR);
     VULKAN_FN(vkCmdPushDescriptorSetWithTemplateKHR);
     #endif
+
+    #ifdef VK_KHR_draw_indirect_count
+    VULKAN_FN(vkCmdDrawIndirectCountKHR);
+    VULKAN_FN(vkCmdDrawIndexedIndirectCountKHR);
+    #endif
     
     #ifdef VK_KHR_swapchain
     VULKAN_FN(vkCreateSwapchainKHR);
@@ -285,6 +290,15 @@ namespace dxvk::vk {
     #ifdef VK_KHR_get_memory_requirements2
     VULKAN_FN(vkGetBufferMemoryRequirements2KHR);
     VULKAN_FN(vkGetImageMemoryRequirements2KHR);
+    #endif
+
+    #ifdef VK_EXT_conditional_rendering
+    VULKAN_FN(vkCmdBeginConditionalRenderingEXT);
+    VULKAN_FN(vkCmdEndConditionalRenderingEXT);
+    #endif
+    
+    #ifdef VK_EXT_host_query_reset
+    VULKAN_FN(vkResetQueryPoolEXT);
     #endif
 
     #ifdef VK_EXT_transform_feedback

@@ -27,7 +27,7 @@ namespace dxvk {
    */
   struct DxvkAdapterMemoryHeapInfo {
     VkMemoryHeapFlags heapFlags;
-    VkDeviceSize memoryAvailable;
+    VkDeviceSize memoryBudget;
     VkDeviceSize memoryAllocated;
   };
 
@@ -40,6 +40,14 @@ namespace dxvk {
   struct DxvkAdapterMemoryInfo {
     uint32_t                  heapCount;
     DxvkAdapterMemoryHeapInfo heaps[VK_MAX_MEMORY_HEAPS];
+  };
+
+  /**
+   * \brief Retrieves queue indices
+   */
+  struct DxvkAdapterQueueIndices {
+    uint32_t graphics;
+    uint32_t transfer;
   };
   
   /**
@@ -162,16 +170,10 @@ namespace dxvk {
       VkImageFormatProperties&  properties) const;
     
     /**
-     * \brief Graphics queue family index
-     * \returns Graphics queue family index
+     * \brief Retrieves queue family indices
+     * \returns Indices for all queue families
      */
-    uint32_t graphicsQueueFamily() const;
-    
-    /**
-     * \brief Presentation queue family index
-     * \returns Presentation queue family index
-     */
-    uint32_t presentQueueFamily() const;
+    DxvkAdapterQueueIndices findQueueFamilies() const;
     
     /**
      * \brief Tests whether all required features are supported
@@ -273,8 +275,14 @@ namespace dxvk {
     void queryDeviceInfo();
     void queryDeviceFeatures();
     void queryDeviceQueues();
+
+    uint32_t findQueueFamily(
+            VkQueueFlags          mask,
+            VkQueueFlags          flags) const;
     
     static void logNameList(const DxvkNameList& names);
+    static void logFeatures(const DxvkDeviceFeatures& features);
+    static void logQueueFamilies(const DxvkAdapterQueueIndices& queues);
     
   };
   

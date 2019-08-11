@@ -17,7 +17,7 @@ namespace dxvk {
     
   public:
     
-    DxvkBarrierSet();
+    DxvkBarrierSet(DxvkCmdBuffer cmdBuffer);
     ~DxvkBarrierSet();
         
     void accessBuffer(
@@ -36,10 +36,27 @@ namespace dxvk {
             VkImageLayout             dstLayout,
             VkPipelineStageFlags      dstStages,
             VkAccessFlags             dstAccess);
-    
-    void accessMemory(
+
+    void releaseBuffer(
+            DxvkBarrierSet&           acquire,
+      const DxvkBufferSliceHandle&    bufSlice,
+            uint32_t                  srcQueue,
             VkPipelineStageFlags      srcStages,
             VkAccessFlags             srcAccess,
+            uint32_t                  dstQueue,
+            VkPipelineStageFlags      dstStages,
+            VkAccessFlags             dstAccess);
+
+    void releaseImage(
+            DxvkBarrierSet&           acquire,
+      const Rc<DxvkImage>&            image,
+      const VkImageSubresourceRange&  subresources,
+            uint32_t                  srcQueue,
+            VkImageLayout             srcLayout,
+            VkPipelineStageFlags      srcStages,
+            VkAccessFlags             srcAccess,
+            uint32_t                  dstQueue,
+            VkImageLayout             dstLayout,
             VkPipelineStageFlags      dstStages,
             VkAccessFlags             dstAccess);
     
@@ -80,6 +97,8 @@ namespace dxvk {
       VkImageSubresourceRange subres;
       DxvkAccessFlags         access;
     };
+
+    DxvkCmdBuffer m_cmdBuffer;
     
     VkPipelineStageFlags m_srcStages = 0;
     VkPipelineStageFlags m_dstStages = 0;
@@ -87,8 +106,8 @@ namespace dxvk {
     VkAccessFlags m_srcAccess = 0;
     VkAccessFlags m_dstAccess = 0;
     
-    std::vector<VkBufferMemoryBarrier>  m_bufBarriers;
-    std::vector<VkImageMemoryBarrier>   m_imgBarriers;
+    std::vector<VkBufferMemoryBarrier> m_bufBarriers;
+    std::vector<VkImageMemoryBarrier>  m_imgBarriers;
 
     std::vector<BufSlice> m_bufSlices;
     std::vector<ImgSlice> m_imgSlices;

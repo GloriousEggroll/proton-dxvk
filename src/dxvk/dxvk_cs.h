@@ -143,13 +143,11 @@ namespace dxvk {
     ~DxvkCsChunk();
     
     /**
-     * \brief Number of commands recorded to the chunk
-     * 
-     * Can be used to check whether the chunk needs to
-     * be dispatched or just to keep track of statistics.
+     * \brief Checks whether the chunk is empty
+     * \returns \c true if the chunk is empty
      */
-    size_t commandCount() const {
-      return m_commandCount;
+    bool empty() const {
+      return m_commandOffset == 0;
     }
 
     /**
@@ -166,7 +164,7 @@ namespace dxvk {
     bool push(T& command) {
       using FuncType = DxvkCsTypedCmd<T>;
       
-      if (m_commandOffset + sizeof(FuncType) > MaxBlockSize)
+      if (unlikely(m_commandOffset > MaxBlockSize - sizeof(FuncType)))
         return false;
       
       DxvkCsCmd* tail = m_tail;
@@ -174,12 +172,11 @@ namespace dxvk {
       m_tail = new (m_data + m_commandOffset)
         FuncType(std::move(command));
       
-      if (tail != nullptr)
+      if (likely(tail != nullptr))
         tail->setNext(m_tail);
       else
         m_head = m_tail;
       
-      m_commandCount  += 1;
       m_commandOffset += sizeof(FuncType);
       return true;
     }
@@ -195,19 +192,18 @@ namespace dxvk {
     M* pushCmd(T& command, Args&&... args) {
       using FuncType = DxvkCsDataCmd<T, M>;
       
-      if (m_commandOffset + sizeof(FuncType) > MaxBlockSize)
+      if (unlikely(m_commandOffset > MaxBlockSize - sizeof(FuncType)))
         return nullptr;
       
       FuncType* func = new (m_data + m_commandOffset)
         FuncType(std::move(command), std::forward<Args>(args)...);
       
-      if (m_tail != nullptr)
+      if (likely(m_tail != nullptr))
         m_tail->setNext(func);
       else
         m_head = func;
       m_tail = func;
 
-      m_commandCount  += 1;
       m_commandOffset += sizeof(FuncType);
       return func->data();
     }
@@ -238,7 +234,6 @@ namespace dxvk {
     
   private:
     
-    size_t m_commandCount  = 0;
     size_t m_commandOffset = 0;
     
     DxvkCsCmd* m_head = nullptr;
@@ -407,6 +402,18 @@ namespace dxvk {
      */
     void synchronize();
     
+    /**
+     * \brief Checks whether the worker thread is busy
+     * 
+     * Note that this information is only reliable if
+     * only the calling thread dispatches jobs to the
+     * worker queue and if the result is \c false.
+     * \returns \c true if there is still work to do
+     */
+    bool isBusy() const {
+      return m_chunksPending.load() != 0;
+    }
+    
   private:
     
     const Rc<DxvkContext>       m_context;
@@ -416,9 +423,8 @@ namespace dxvk {
     std::condition_variable     m_condOnAdd;
     std::condition_variable     m_condOnSync;
     std::queue<DxvkCsChunkRef>  m_chunksQueued;
+    std::atomic<uint32_t>       m_chunksPending = { 0u };
     dxvk::thread                m_thread;
-    
-    uint32_t                    m_chunksPending = 0;
     
     void threadFunc();
     

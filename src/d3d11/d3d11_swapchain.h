@@ -72,10 +72,8 @@ namespace dxvk {
   private:
 
     enum BindingIds : uint32_t {
-      Sampler   = 0,
-      Texture   = 1,
-      GammaSmp  = 2,
-      GammaTex  = 3,
+      Image = 0,
+      Gamma = 1,
     };
 
     Com<D3D11DXGIDevice>    m_dxgiDevice;
@@ -115,14 +113,16 @@ namespace dxvk {
 
     D3D11Texture2D*         m_backBuffer = nullptr;
 
+    DxvkSubmitStatus        m_presentStatus;
+
     std::vector<Rc<DxvkImageView>> m_imageViews;
 
     bool                    m_dirty = true;
     bool                    m_vsync = true;
 
-    bool                    m_usePresentFence = true;
-
     void PresentImage(UINT SyncInterval);
+
+    void SynchronizePresent();
 
     void FlushImmediateContext();
     
@@ -138,6 +138,8 @@ namespace dxvk {
     void CreateGammaTexture(
             UINT                NumControlPoints,
       const D3D11_VK_GAMMA_CP*  pControlPoints);
+    
+    void DestroyGammaTexture();
     
     void CreateHud();
 

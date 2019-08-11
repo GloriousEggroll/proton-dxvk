@@ -39,12 +39,15 @@ namespace dxvk::util {
   
   
   void packImageData(
-          char*             dstData,
-    const char*             srcData,
+          void*             dstBytes,
+    const void*             srcBytes,
           VkExtent3D        blockCount,
           VkDeviceSize      blockSize,
           VkDeviceSize      pitchPerRow,
           VkDeviceSize      pitchPerLayer) {
+    auto dstData = reinterpret_cast<      char*>(dstBytes);
+    auto srcData = reinterpret_cast<const char*>(srcBytes);
+    
     const VkDeviceSize bytesPerRow   = blockCount.width  * blockSize;
     const VkDeviceSize bytesPerLayer = blockCount.height * bytesPerRow;
     const VkDeviceSize bytesTotal    = blockCount.depth  * bytesPerLayer;
@@ -147,6 +150,21 @@ namespace dxvk::util {
       case VK_COMPONENT_SWIZZLE_A: return 3;
       default: return identity; /* identity, zero, one */
     }
+  }
+
+
+  VkClearColorValue swizzleClearColor(
+          VkClearColorValue           color,
+          VkComponentMapping          mapping) {
+    VkClearColorValue result;
+    auto swizzles = &mapping.r;
+
+    for (uint32_t i = 0; i < 4; i++) {
+      uint32_t index = getComponentIndex(swizzles[i], i);
+      result.uint32[i] = color.uint32[index];
+    }
+
+    return result;
   }
 
 
