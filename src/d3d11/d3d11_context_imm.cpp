@@ -3,8 +3,9 @@
 #include "d3d11_device.h"
 #include "d3d11_texture.h"
 
-constexpr static uint32_t MinFlushIntervalUs = 1250;
-constexpr static uint32_t MaxPendingSubmits  = 3;
+constexpr static uint32_t MinFlushIntervalUs = 750;
+constexpr static uint32_t IncFlushIntervalUs = 250;
+constexpr static uint32_t MaxPendingSubmits  = 6;
 
 namespace dxvk {
   
@@ -54,59 +55,66 @@ namespace dxvk {
   }
   
   
-  void STDMETHODCALLTYPE D3D11ImmediateContext::End(
-          ID3D11Asynchronous*               pAsync) {
-    D3D11DeviceContext::End(pAsync);
-
-    if (pAsync) {
-      D3D11_QUERY_DESC desc;
-      static_cast<D3D11Query*>(pAsync)->GetDesc(&desc);
-      
-      if (desc.Query == D3D11_QUERY_EVENT)
-        FlushImplicit(TRUE);
-    }
-  }
-
-
   HRESULT STDMETHODCALLTYPE D3D11ImmediateContext::GetData(
           ID3D11Asynchronous*               pAsync,
           void*                             pData,
           UINT                              DataSize,
           UINT                              GetDataFlags) {
-    if (!pAsync)
+    if (!pAsync || (DataSize && !pData))
       return E_INVALIDARG;
     
-    // Make sure that we can safely write to the memory
-    // location pointed to by pData if it is specified.
-    if (DataSize == 0)
-      pData = nullptr;
-    
-    if (pData && pAsync->GetDataSize() != DataSize) {
-      Logger::err(str::format(
-        "D3D11: GetData: Data size mismatch",
-        "\n  Expected: ", pAsync->GetDataSize(),
-        "\n  Got:      ", DataSize));
+    // Check whether the data size is actually correct
+    if (DataSize && DataSize != pAsync->GetDataSize())
       return E_INVALIDARG;
-    }
     
+    // Passing a non-null pData is actually allowed if
+    // DataSize is 0, but we should ignore that pointer
+    pData = DataSize ? pData : nullptr;
+
+    // Ensure that all query commands actually get
+    // executed before trying to access the query
+    SynchronizeCsThread();
+
     // Get query status directly from the query object
-    HRESULT hr = static_cast<D3D11Query*>(pAsync)->GetData(pData, GetDataFlags);
+    auto query = static_cast<D3D11Query*>(pAsync);
+    HRESULT hr = query->GetData(pData, GetDataFlags);
     
     // If we're likely going to spin on the asynchronous object,
-    // flush the context so that we're keeping the GPU busy
-    if (hr == S_FALSE)
+    // flush the context so that we're keeping the GPU busy.
+    if (hr == S_FALSE) {
+      // Don't mark the event query as stalling if the app does
+      // not intend to spin on it. This reduces flushes on End.
+      if (!(GetDataFlags & D3D11_ASYNC_GETDATA_DONOTFLUSH))
+        query->NotifyStall();
+
+      // Ignore the DONOTFLUSH flag here as some games will spin
+      // on queries without ever flushing the context otherwise.
       FlushImplicit(FALSE);
+    }
     
     return hr;
   }
   
   
+  void STDMETHODCALLTYPE D3D11ImmediateContext::End(ID3D11Asynchronous* pAsync) {
+    D3D11DeviceContext::End(pAsync);
+
+    auto query = static_cast<D3D11Query*>(pAsync);
+    if (unlikely(query && query->IsEvent())) {
+      query->NotifyEnd();
+      query->IsStalling()
+        ? Flush()
+        : FlushImplicit(TRUE);
+    }
+  }
+
+
   void STDMETHODCALLTYPE D3D11ImmediateContext::Flush() {
     m_parent->FlushInitContext();
     
     D3D10DeviceLock lock = LockContext();
     
-    if (m_csIsBusy || m_csChunk->commandCount() != 0) {
+    if (m_csIsBusy || !m_csChunk->empty()) {
       // Add commands to flush the threaded
       // context, then flush the command list
       EmitCs([] (DxvkContext* ctx) {
@@ -170,7 +178,7 @@ namespace dxvk {
           D3D11_MAPPED_SUBRESOURCE*   pMappedResource) {
     D3D10DeviceLock lock = LockContext();
 
-    if (!pResource || !pMappedResource)
+    if (unlikely(!pResource || !pMappedResource))
       return E_INVALIDARG;
     
     D3D11_RESOURCE_DIMENSION resourceDim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
@@ -178,7 +186,7 @@ namespace dxvk {
 
     HRESULT hr;
     
-    if (resourceDim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+    if (likely(resourceDim == D3D11_RESOURCE_DIMENSION_BUFFER)) {
       hr = MapBuffer(
         static_cast<D3D11Buffer*>(pResource),
         MapType, MapFlags, pMappedResource);
@@ -189,11 +197,8 @@ namespace dxvk {
         pMappedResource);
     }
 
-    if (unlikely(FAILED(hr))) {
-      pMappedResource->pData      = nullptr;
-      pMappedResource->RowPitch   = 0;
-      pMappedResource->DepthPitch = 0;
-    }
+    if (unlikely(FAILED(hr)))
+      *pMappedResource = D3D11_MAPPED_SUBRESOURCE();
 
     return hr;
   }
@@ -202,69 +207,14 @@ namespace dxvk {
   void STDMETHODCALLTYPE D3D11ImmediateContext::Unmap(
           ID3D11Resource*             pResource,
           UINT                        Subresource) {
-    D3D10DeviceLock lock = LockContext();
-
     D3D11_RESOURCE_DIMENSION resourceDim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
     pResource->GetType(&resourceDim);
     
-    if (resourceDim != D3D11_RESOURCE_DIMENSION_BUFFER)
+    if (unlikely(resourceDim != D3D11_RESOURCE_DIMENSION_BUFFER)) {
+      D3D10DeviceLock lock = LockContext();
       UnmapImage(GetCommonTexture(pResource), Subresource);
+    }
   }
-  
-  
-  void STDMETHODCALLTYPE D3D11ImmediateContext::CopySubresourceRegion(
-          ID3D11Resource*                   pDstResource,
-          UINT                              DstSubresource,
-          UINT                              DstX,
-          UINT                              DstY,
-          UINT                              DstZ,
-          ID3D11Resource*                   pSrcResource,
-          UINT                              SrcSubresource,
-    const D3D11_BOX*                        pSrcBox) {
-    FlushImplicit(FALSE);
-
-    D3D11DeviceContext::CopySubresourceRegion(
-      pDstResource, DstSubresource, DstX, DstY, DstZ,
-      pSrcResource, SrcSubresource, pSrcBox);
-  }
-  
-
-  void STDMETHODCALLTYPE D3D11ImmediateContext::CopySubresourceRegion1(
-          ID3D11Resource*                   pDstResource,
-          UINT                              DstSubresource,
-          UINT                              DstX,
-          UINT                              DstY,
-          UINT                              DstZ,
-          ID3D11Resource*                   pSrcResource,
-          UINT                              SrcSubresource,
-    const D3D11_BOX*                        pSrcBox,
-          UINT                              CopyFlags) {
-    FlushImplicit(FALSE);
-
-    D3D11DeviceContext::CopySubresourceRegion1(
-      pDstResource, DstSubresource, DstX, DstY, DstZ,
-      pSrcResource, SrcSubresource, pSrcBox, CopyFlags);
-  }
-
-  
-  void STDMETHODCALLTYPE D3D11ImmediateContext::CopyResource(
-          ID3D11Resource*                   pDstResource,
-          ID3D11Resource*                   pSrcResource) {
-    FlushImplicit(FALSE);
-
-    D3D11DeviceContext::CopyResource(
-      pDstResource, pSrcResource);
-  }
-
-  
-  void STDMETHODCALLTYPE D3D11ImmediateContext::GenerateMips(
-          ID3D11ShaderResourceView*         pShaderResourceView) {
-    FlushImplicit(FALSE);
-
-    D3D11DeviceContext::GenerateMips(
-      pShaderResourceView);
-  }
-  
 
   void STDMETHODCALLTYPE D3D11ImmediateContext::UpdateSubresource(
           ID3D11Resource*                   pDstResource,
@@ -297,27 +247,12 @@ namespace dxvk {
       CopyFlags);
   }
   
-
-  void STDMETHODCALLTYPE D3D11ImmediateContext::ResolveSubresource(
-          ID3D11Resource*                   pDstResource,
-          UINT                              DstSubresource,
-          ID3D11Resource*                   pSrcResource,
-          UINT                              SrcSubresource,
-          DXGI_FORMAT                       Format) {
-    FlushImplicit(FALSE);
-
-    D3D11DeviceContext::ResolveSubresource(
-      pDstResource, DstSubresource,
-      pSrcResource, SrcSubresource,
-      Format);
-  }
-
-
+  
   void STDMETHODCALLTYPE D3D11ImmediateContext::OMSetRenderTargets(
           UINT                              NumViews,
           ID3D11RenderTargetView* const*    ppRenderTargetViews,
           ID3D11DepthStencilView*           pDepthStencilView) {
-    FlushImplicit(FALSE);
+    FlushImplicit(TRUE);
     
     D3D11DeviceContext::OMSetRenderTargets(
       NumViews, ppRenderTargetViews, pDepthStencilView);
@@ -332,7 +267,7 @@ namespace dxvk {
           UINT                              NumUAVs,
           ID3D11UnorderedAccessView* const* ppUnorderedAccessViews,
     const UINT*                             pUAVInitialCounts) {
-    FlushImplicit(FALSE);
+    FlushImplicit(TRUE);
 
     D3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews(
       NumRTVs, ppRenderTargetViews, pDepthStencilView,
@@ -395,18 +330,22 @@ namespace dxvk {
           UINT                        MapFlags,
           D3D11_MAPPED_SUBRESOURCE*   pMappedResource) {
     const Rc<DxvkImage>  mappedImage  = pResource->GetImage();
-    const Rc<DxvkBuffer> mappedBuffer = pResource->GetMappedBuffer();
+    const Rc<DxvkBuffer> mappedBuffer = pResource->GetMappedBuffer(Subresource);
     
     if (unlikely(pResource->GetMapMode() == D3D11_COMMON_TEXTURE_MAP_MODE_NONE)) {
       Logger::err("D3D11: Cannot map a device-local image");
       return E_INVALIDARG;
     }
+
+    if (unlikely(Subresource >= pResource->CountSubresources()))
+      return E_INVALIDARG;
+
+    VkFormat packedFormat = m_parent->LookupPackedFormat(
+      pResource->Desc()->Format, pResource->GetFormatMode()).Format;
     
-    auto formatInfo = imageFormatInfo(mappedImage->info().format);
+    auto formatInfo = imageFormatInfo(packedFormat);
     auto subresource = pResource->GetSubresourceFromIndex(
-        formatInfo->aspectMask, Subresource);
-    
-    pResource->SetMappedSubresource(subresource, MapType);
+      formatInfo->aspectMask, Subresource);
     
     if (pResource->GetMapMode() == D3D11_COMMON_TEXTURE_MAP_MODE_DIRECT) {
       const VkImageType imageType = mappedImage->info().type;
@@ -415,50 +354,15 @@ namespace dxvk {
       if (!WaitForResource(mappedImage, MapFlags))
         return DXGI_ERROR_WAS_STILL_DRAWING;
       
+      // Mark the given subresource as mapped
+      pResource->SetMapType(Subresource, MapType);
+
       // Query the subresource's memory layout and hope that
       // the application respects the returned pitch values.
       VkSubresourceLayout layout  = mappedImage->querySubresourceLayout(subresource);
       pMappedResource->pData      = mappedImage->mapPtr(layout.offset);
       pMappedResource->RowPitch   = imageType >= VK_IMAGE_TYPE_2D ? layout.rowPitch   : layout.size;
       pMappedResource->DepthPitch = imageType >= VK_IMAGE_TYPE_3D ? layout.depthPitch : layout.size;
-      return S_OK;
-    } else if (formatInfo->aspectMask == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
-      VkExtent3D levelExtent = mappedImage->mipLevelExtent(subresource.mipLevel);
-
-      if (MapType != D3D11_MAP_READ) {
-        Logger::err(str::format("D3D11: Map type ", MapType, " not supported for depth-stencil images"));
-        return E_INVALIDARG;
-      }
-
-      // The actual Vulkan image format may differ
-      // from the format requested by the application
-      VkFormat packFormat = GetPackedDepthStencilFormat(pResource->Desc()->Format);
-      auto packFormatInfo = imageFormatInfo(packFormat);
-
-      // This is slow, but we have to dispatch a pack
-      // operation and then immediately synchronize.
-      EmitCs([
-        cImageBuffer = mappedBuffer,
-        cImage       = mappedImage,
-        cSubresource = subresource,
-        cFormat      = packFormat
-      ] (DxvkContext* ctx) {
-        auto layers = vk::makeSubresourceLayers(cSubresource);
-        auto x = cImage->mipLevelExtent(cSubresource.mipLevel);
-
-        VkOffset2D offset = { 0, 0 };
-        VkExtent2D extent = { x.width, x.height };
-
-        ctx->copyDepthStencilImageToPackedBuffer(
-          cImageBuffer, 0, cImage, layers, offset, extent, cFormat);
-      });
-
-      WaitForResource(mappedBuffer, 0);
-
-      DxvkBufferSliceHandle physSlice = mappedBuffer->getSliceHandle();
-      pMappedResource->pData      = physSlice.mapPtr;
-      pMappedResource->RowPitch   = packFormatInfo->elementSize * levelExtent.width;
-      pMappedResource->DepthPitch = packFormatInfo->elementSize * levelExtent.width * levelExtent.height;
       return S_OK;
     } else {
       VkExtent3D levelExtent = mappedImage->mipLevelExtent(subresource.mipLevel);
@@ -481,28 +385,22 @@ namespace dxvk {
         // When using any map mode which requires the image contents
         // to be preserved, and if the GPU has write access to the
         // image, copy the current image contents into the buffer.
-        const bool copyExistingData = pResource->Desc()->Usage == D3D11_USAGE_STAGING;
-        
-        if (copyExistingData) {
-          auto subresourceLayers = vk::makeSubresourceLayers(subresource);
-          
-          EmitCs([
-            cImageBuffer  = mappedBuffer,
-            cImage        = mappedImage,
-            cSubresources = subresourceLayers,
-            cLevelExtent  = levelExtent
-          ] (DxvkContext* ctx) {
-            ctx->copyImageToBuffer(
-              cImageBuffer, 0, VkExtent2D { 0u, 0u },
-              cImage, cSubresources, VkOffset3D { 0, 0, 0 },
-              cLevelExtent);
-          });
+        if (pResource->Desc()->Usage == D3D11_USAGE_STAGING
+         && !pResource->CanUpdateMappedBufferEarly()) {
+          UpdateMappedBuffer(pResource, subresource);
+          MapFlags &= ~D3D11_MAP_FLAG_DO_NOT_WAIT;
         }
         
-        WaitForResource(mappedBuffer, 0);
+        // Wait for mapped buffer to become available
+        if (!WaitForResource(mappedBuffer, MapFlags))
+          return DXGI_ERROR_WAS_STILL_DRAWING;
+        
         physSlice = mappedBuffer->getSliceHandle();
       }
       
+      // Mark the given subresource as mapped
+      pResource->SetMapType(Subresource, MapType);
+
       // Set up map pointer. Data is tightly packed within the mapped buffer.
       pMappedResource->pData      = physSlice.mapPtr;
       pMappedResource->RowPitch   = formatInfo->elementSize * blockCount.width;
@@ -515,17 +413,26 @@ namespace dxvk {
   void D3D11ImmediateContext::UnmapImage(
           D3D11CommonTexture*         pResource,
           UINT                        Subresource) {
-    if (pResource->GetMapType() == D3D11_MAP_READ)
+    D3D11_MAP mapType = pResource->GetMapType(Subresource);
+    pResource->SetMapType(Subresource, D3D11_MAP(~0u));
+
+    if (mapType == D3D11_MAP(~0u)
+     || mapType == D3D11_MAP_READ)
       return;
     
     if (pResource->GetMapMode() == D3D11_COMMON_TEXTURE_MAP_MODE_BUFFER) {
       // Now that data has been written into the buffer,
       // we need to copy its contents into the image
       const Rc<DxvkImage>  mappedImage  = pResource->GetImage();
-      const Rc<DxvkBuffer> mappedBuffer = pResource->GetMappedBuffer();
-      
-      VkImageSubresource subresource = pResource->GetMappedSubresource();
-      
+      const Rc<DxvkBuffer> mappedBuffer = pResource->GetMappedBuffer(Subresource);
+
+      VkFormat packedFormat = m_parent->LookupPackedFormat(
+        pResource->Desc()->Format, pResource->GetFormatMode()).Format;
+
+      auto formatInfo = imageFormatInfo(packedFormat);
+      auto subresource = pResource->GetSubresourceFromIndex(
+        formatInfo->aspectMask, Subresource);
+
       VkExtent3D levelExtent = mappedImage
         ->mipLevelExtent(subresource.mipLevel);
       
@@ -538,18 +445,51 @@ namespace dxvk {
         cSrcBuffer      = mappedBuffer,
         cDstImage       = mappedImage,
         cDstLayers      = subresourceLayers,
-        cDstLevelExtent = levelExtent
+        cDstLevelExtent = levelExtent,
+        cPackedFormat   = GetPackedDepthStencilFormat(pResource->Desc()->Format)
       ] (DxvkContext* ctx) {
-        ctx->copyBufferToImage(cDstImage, cDstLayers,
-          VkOffset3D { 0, 0, 0 }, cDstLevelExtent,
-          cSrcBuffer, 0, { 0u, 0u });
+        if (cPackedFormat == VK_FORMAT_UNDEFINED) {
+          ctx->copyBufferToImage(cDstImage, cDstLayers,
+            VkOffset3D { 0, 0, 0 }, cDstLevelExtent,
+            cSrcBuffer, 0, { 0u, 0u });
+        } else {
+          ctx->copyPackedBufferToDepthStencilImage(
+            cDstImage, cDstLayers,
+            VkOffset2D { 0, 0 },
+            VkExtent2D { cDstLevelExtent.width, cDstLevelExtent.height },
+            cSrcBuffer, 0, cPackedFormat);
+        }
       });
     }
-    
-    pResource->ClearMappedSubresource();
   }
   
   
+  void STDMETHODCALLTYPE D3D11ImmediateContext::SwapDeviceContextState(
+          ID3DDeviceContextState*           pState,
+          ID3DDeviceContextState**          ppPreviousState) {
+    InitReturnPtr(ppPreviousState);
+
+    if (!pState)
+      return;
+    
+    Com<D3D11DeviceContextState> oldState = std::move(m_stateObject);
+    Com<D3D11DeviceContextState> newState = static_cast<D3D11DeviceContextState*>(pState);
+
+    if (oldState == nullptr)
+      oldState = new D3D11DeviceContextState(m_parent);
+    
+    if (ppPreviousState)
+      *ppPreviousState = oldState.ref();
+    
+    m_stateObject = newState;
+
+    oldState->SetState(m_state);
+    newState->GetState(m_state);
+
+    RestoreState();
+  }
+
+
   void D3D11ImmediateContext::SynchronizeCsThread() {
     D3D10DeviceLock lock = LockContext();
 
@@ -557,7 +497,8 @@ namespace dxvk {
     // recorded prior to this function will be run
     FlushCsChunk();
     
-    m_csThread.synchronize();
+    if (m_csThread.isBusy())
+      m_csThread.synchronize();
   }
   
   
@@ -610,11 +551,16 @@ namespace dxvk {
   void D3D11ImmediateContext::FlushImplicit(BOOL StrongHint) {
     // Flush only if the GPU is about to go idle, in
     // order to keep the number of submissions low.
-    if (StrongHint || m_device->pendingSubmissions() <= MaxPendingSubmits) {
+    uint32_t pending = m_device->pendingSubmissions();
+
+    if (StrongHint || pending <= MaxPendingSubmits) {
       auto now = std::chrono::high_resolution_clock::now();
 
+      uint32_t delay = MinFlushIntervalUs
+                     + IncFlushIntervalUs * pending;
+
       // Prevent flushing too often in short intervals.
-      if (now - m_lastFlush >= std::chrono::microseconds(MinFlushIntervalUs))
+      if (now - m_lastFlush >= std::chrono::microseconds(delay))
         Flush();
     }
   }

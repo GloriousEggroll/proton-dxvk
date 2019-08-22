@@ -1,12 +1,15 @@
 #include <cstring>
 
+#include "d3d11_device.h"
 #include "d3d11_initializer.h"
 
 namespace dxvk {
 
   D3D11Initializer::D3D11Initializer(
-    const Rc<DxvkDevice>&             Device)
-  : m_device(Device), m_context(m_device->createContext()) {
+          D3D11Device*                pParent)
+  : m_parent(pParent),
+    m_device(pParent->GetDXVKDevice()),
+    m_context(m_device->createContext()) {
     m_context->beginRecording(
       m_device->createCommandList());
   }
@@ -57,10 +60,8 @@ namespace dxvk {
       m_transferMemory   += bufferSlice.length();
       m_transferCommands += 1;
       
-      m_context->updateBuffer(
+      m_context->uploadBuffer(
         bufferSlice.buffer(),
-        bufferSlice.offset(),
-        bufferSlice.length(),
         pInitialData->pSysMem);
     } else {
       m_transferCommands += 1;
@@ -104,22 +105,22 @@ namespace dxvk {
     
     Rc<DxvkImage> image = pTexture->GetImage();
 
+    VkFormat packedFormat = m_parent->LookupPackedFormat(
+      pTexture->Desc()->Format, pTexture->GetFormatMode()).Format;
+    
     auto formatInfo = imageFormatInfo(image->info().format);
 
     if (pInitialData != nullptr && pInitialData->pSysMem != nullptr) {
       // pInitialData is an array that stores an entry for
       // every single subresource. Since we will define all
       // subresources, this counts as initialization.
-      VkImageSubresourceLayers subresourceLayers;
-      subresourceLayers.aspectMask     = formatInfo->aspectMask;
-      subresourceLayers.mipLevel       = 0;
-      subresourceLayers.baseArrayLayer = 0;
-      subresourceLayers.layerCount     = 1;
-      
       for (uint32_t layer = 0; layer < image->info().numLayers; layer++) {
         for (uint32_t level = 0; level < image->info().mipLevels; level++) {
-          subresourceLayers.baseArrayLayer = layer;
+          VkImageSubresourceLayers subresourceLayers;
+          subresourceLayers.aspectMask     = formatInfo->aspectMask;
           subresourceLayers.mipLevel       = level;
+          subresourceLayers.baseArrayLayer = layer;
+          subresourceLayers.layerCount     = 1;
           
           const uint32_t id = D3D11CalcSubresource(
             level, layer, image->info().mipLevels);
@@ -131,13 +132,28 @@ namespace dxvk {
           m_transferMemory   += util::computeImageDataSize(
             image->info().format, mipLevelExtent);
           
-          m_context->updateImage(
-            image, subresourceLayers,
-            mipLevelOffset,
-            mipLevelExtent,
-            pInitialData[id].pSysMem,
-            pInitialData[id].SysMemPitch,
-            pInitialData[id].SysMemSlicePitch);
+          if (formatInfo->aspectMask != (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+            m_context->uploadImage(
+              image, subresourceLayers,
+              pInitialData[id].pSysMem,
+              pInitialData[id].SysMemPitch,
+              pInitialData[id].SysMemSlicePitch);
+          } else {
+            m_context->updateDepthStencilImage(
+              image, subresourceLayers,
+              VkOffset2D { mipLevelOffset.x,     mipLevelOffset.y      },
+              VkExtent2D { mipLevelExtent.width, mipLevelExtent.height },
+              pInitialData[id].pSysMem,
+              pInitialData[id].SysMemPitch,
+              pInitialData[id].SysMemSlicePitch,
+              packedFormat);
+          }
+
+          if (pTexture->GetMapMode() == D3D11_COMMON_TEXTURE_MAP_MODE_BUFFER) {
+            util::packImageData(pTexture->GetMappedBuffer(id)->mapPtr(0), pInitialData[id].pSysMem,
+              util::computeBlockCount(image->mipLevelExtent(level), formatInfo->blockSize),
+              formatInfo->elementSize, pInitialData[id].SysMemPitch, pInitialData[id].SysMemSlicePitch);
+          }
         }
       }
     } else {
@@ -164,7 +180,7 @@ namespace dxvk {
             image, value, subresources);
         } else {
           VkClearDepthStencilValue value;
-          value.depth   = 1.0f;
+          value.depth   = 0.0f;
           value.stencil = 0;
           
           m_context->clearDepthStencilImage(

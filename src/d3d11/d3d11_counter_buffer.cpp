@@ -38,8 +38,8 @@ namespace dxvk {
 
 
   void D3D11CounterBuffer::CreateBuffer() {
-    Rc<DxvkBuffer> buffer = m_device->createBuffer(
-      m_bufferInfo, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    Rc<DxvkBuffer> buffer = m_device->createBuffer(m_bufferInfo,
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     
     VkDeviceSize sliceCount = m_bufferInfo.size / m_sliceLength;
     

@@ -25,6 +25,33 @@ namespace dxvk {
   };
 
   /**
+   * \brief Copy pipeline key
+   * 
+   * Used to look up copy pipelines based
+   * on the copy operation they support.
+   */
+  struct DxvkMetaResolvePipelineKey {
+    VkFormat                  format;
+    VkSampleCountFlagBits     samples;
+    VkResolveModeFlagBitsKHR  modeD;
+    VkResolveModeFlagBitsKHR  modeS;
+
+    bool eq(const DxvkMetaResolvePipelineKey& other) const {
+      return this->format  == other.format
+          && this->samples == other.samples
+          && this->modeD   == other.modeD
+          && this->modeS   == other.modeS;
+    }
+
+    size_t hash() const {
+      return (uint32_t(format)  << 4)
+           ^ (uint32_t(samples) << 0)
+           ^ (uint32_t(modeD)   << 12)
+           ^ (uint32_t(modeS)   << 16);
+    }
+  };
+
+  /**
    * \brief Meta resolve render pass
    * 
    * Stores a framebuffer and image view objects
@@ -37,7 +64,16 @@ namespace dxvk {
     DxvkMetaResolveRenderPass(
       const Rc<vk::DeviceFn>&   vkd,
       const Rc<DxvkImageView>&  dstImageView,
-      const Rc<DxvkImageView>&  srcImageView);
+      const Rc<DxvkImageView>&  srcImageView,
+      const Rc<DxvkImageView>&  srcStencilView,
+            bool                discardDst);
+    
+    DxvkMetaResolveRenderPass(
+      const Rc<vk::DeviceFn>&        vkd,
+      const Rc<DxvkImageView>&       dstImageView,
+      const Rc<DxvkImageView>&       srcImageView,
+            VkResolveModeFlagBitsKHR modeD,
+            VkResolveModeFlagBitsKHR modeS);
     
     ~DxvkMetaResolveRenderPass();
     
@@ -55,78 +91,95 @@ namespace dxvk {
 
     const Rc<DxvkImageView> m_dstImageView;
     const Rc<DxvkImageView> m_srcImageView;
+    const Rc<DxvkImageView> m_srcStencilView;
     
     VkRenderPass  m_renderPass  = VK_NULL_HANDLE;
     VkFramebuffer m_framebuffer = VK_NULL_HANDLE;
 
-    VkRenderPass createRenderPass() const;
+    VkRenderPass createShaderRenderPass(bool discard) const;
+    
+    VkRenderPass createAttachmentRenderPass(
+            VkResolveModeFlagBitsKHR modeD,
+            VkResolveModeFlagBitsKHR modeS) const;
 
-    VkFramebuffer createFramebuffer() const;
+    VkFramebuffer createShaderFramebuffer() const;
+    
+    VkFramebuffer createAttachmentFramebuffer() const;
 
   };
-
+  
 
   /**
    * \brief Meta resolve objects
-   *
-   * Stores render pass objects and pipelines used
-   * for shader-based resolve operations. Due to
-   * the Vulkan design, we have to create one render
-   * pass and pipeline object per image format used.
+   * 
+   * Implements resolve operations in fragment
+   * shaders when using different formats.
    */
-  class DxvkMetaResolveObjects : public RcObject {
+  class DxvkMetaResolveObjects {
 
   public:
 
-    DxvkMetaResolveObjects(const Rc<vk::DeviceFn>& vkd);
+    DxvkMetaResolveObjects(const DxvkDevice* device);
     ~DxvkMetaResolveObjects();
 
     /**
-     * \brief Creates a resolve pipeline
+     * \brief Creates pipeline for meta copy operation
      * 
-     * \param [in] format Image view format
-     * \returns The pipeline handles to use
+     * \param [in] format Destination image format
+     * \param [in] samples Destination sample count
+     * \param [in] depthResolveMode Depth resolve mode
+     * \param [in] stencilResolveMode Stencil resolve mode
+     * \returns Compatible pipeline for the operation
      */
     DxvkMetaResolvePipeline getPipeline(
-            VkFormat            format);
+            VkFormat                  format,
+            VkSampleCountFlagBits     samples,
+            VkResolveModeFlagBitsKHR  depthResolveMode,
+            VkResolveModeFlagBitsKHR  stencilResolveMode);
 
   private:
 
     Rc<vk::DeviceFn> m_vkd;
 
     VkSampler m_sampler;
-    
-    VkShaderModule m_shaderVert;
-    VkShaderModule m_shaderGeom;
-    VkShaderModule m_shaderFragF;
-    VkShaderModule m_shaderFragI;
-    VkShaderModule m_shaderFragU;
+
+    VkShaderModule m_shaderVert  = VK_NULL_HANDLE;
+    VkShaderModule m_shaderGeom  = VK_NULL_HANDLE;
+    VkShaderModule m_shaderFragF = VK_NULL_HANDLE;
+    VkShaderModule m_shaderFragU = VK_NULL_HANDLE;
+    VkShaderModule m_shaderFragI = VK_NULL_HANDLE;
+    VkShaderModule m_shaderFragD = VK_NULL_HANDLE;
+    VkShaderModule m_shaderFragDS = VK_NULL_HANDLE;
 
     std::mutex m_mutex;
-    
-    std::unordered_map<VkFormat, DxvkMetaResolvePipeline> m_pipelines;
 
+    std::unordered_map<
+      DxvkMetaResolvePipelineKey,
+      DxvkMetaResolvePipeline,
+      DxvkHash, DxvkEq> m_pipelines;
+    
     VkSampler createSampler() const;
     
     VkShaderModule createShaderModule(
-      const SpirvCodeBuffer&      code) const;
+      const SpirvCodeBuffer&          code) const;
     
     DxvkMetaResolvePipeline createPipeline(
-            VkFormat              format);
+      const DxvkMetaResolvePipelineKey& key);
 
     VkRenderPass createRenderPass(
-            VkFormat              format) const;
+      const DxvkMetaResolvePipelineKey& key);
     
-    VkDescriptorSetLayout createDescriptorSetLayout() const;
+    VkDescriptorSetLayout createDescriptorSetLayout(
+      const DxvkMetaResolvePipelineKey& key);
     
     VkPipelineLayout createPipelineLayout(
-            VkDescriptorSetLayout descriptorSetLayout) const;
+            VkDescriptorSetLayout  descriptorSetLayout);
     
-    VkPipeline createPipeline(
-            VkPipelineLayout      pipelineLayout,
-            VkRenderPass          renderPass,
-            VkFormat              format) const;
-
+    VkPipeline createPipelineObject(
+      const DxvkMetaResolvePipelineKey& key,
+            VkPipelineLayout       pipelineLayout,
+            VkRenderPass           renderPass);
+    
   };
-  
+
 }

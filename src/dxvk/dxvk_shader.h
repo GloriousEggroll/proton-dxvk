@@ -8,6 +8,7 @@
 #include "dxvk_shader_key.h"
 
 #include "../spirv/spirv_code_buffer.h"
+#include "../spirv/spirv_compression.h"
 
 namespace dxvk {
   
@@ -30,10 +31,7 @@ namespace dxvk {
     // Specialization constants for pipeline state
     SpecConstantRangeStart      = ColorComponentMappings + MaxNumRenderTargets * 4,
     RasterizerSampleCount       = SpecConstantRangeStart + 0,
-
-    /// Lowest and highest known spec constant IDs
-    SpecConstantIdMin           = RasterizerSampleCount,
-    SpecConstantIdMax           = RasterizerSampleCount,
+    FirstPipelineConstant
   };
   
   
@@ -45,8 +43,10 @@ namespace dxvk {
    * purely for validation purposes.
    */
   struct DxvkInterfaceSlots {
-    uint32_t inputSlots  = 0;
-    uint32_t outputSlots = 0;
+    uint32_t inputSlots      = 0;
+    uint32_t outputSlots     = 0;
+    uint32_t pushConstOffset = 0;
+    uint32_t pushConstSize   = 0;
   };
 
 
@@ -128,7 +128,7 @@ namespace dxvk {
             uint32_t                slotCount,
       const DxvkResourceSlot*       slotInfos,
       const DxvkInterfaceSlots&     iface,
-      const SpirvCodeBuffer&        code,
+            SpirvCodeBuffer         code,
       const DxvkShaderOptions&      options,
             DxvkShaderConstData&&   constData);
     
@@ -173,7 +173,7 @@ namespace dxvk {
      * \param [in] info Module create info
      * \returns The shader module
      */
-    Rc<DxvkShaderModule> createShaderModule(
+    DxvkShaderModule createShaderModule(
       const Rc<vk::DeviceFn>&          vkd,
       const DxvkDescriptorSlotMapping& mapping,
       const DxvkShaderModuleCreateInfo& info);
@@ -244,7 +244,7 @@ namespace dxvk {
   private:
     
     VkShaderStageFlagBits m_stage;
-    SpirvCodeBuffer       m_code;
+    SpirvCompressedBuffer m_code;
     
     std::vector<DxvkResourceSlot> m_slots;
     std::vector<size_t>           m_idOffsets;
@@ -252,6 +252,8 @@ namespace dxvk {
     DxvkShaderOptions             m_options;
     DxvkShaderConstData           m_constData;
     DxvkShaderKey                 m_key;
+
+    std::vector<spv::Capability>  m_capabilities;
 
     size_t m_o1IdxOffset = 0;
     size_t m_o1LocOffset = 0;
@@ -267,9 +269,13 @@ namespace dxvk {
    * context will create pipeline objects on the
    * fly when executing draw calls.
    */
-  class DxvkShaderModule : public RcObject {
+  class DxvkShaderModule {
     
   public:
+
+    DxvkShaderModule();
+
+    DxvkShaderModule(DxvkShaderModule&& other);
     
     DxvkShaderModule(
       const Rc<vk::DeviceFn>&     vkd,
@@ -277,14 +283,8 @@ namespace dxvk {
       const SpirvCodeBuffer&      code);
     
     ~DxvkShaderModule();
-    
-    /**
-     * \brief Shader module handle
-     * \returns Shader module handle
-     */
-    VkShaderModule handle() const {
-      return m_module;
-    }
+
+    DxvkShaderModule& operator = (DxvkShaderModule&& other);
     
     /**
      * \brief Shader stage creation info
@@ -293,29 +293,24 @@ namespace dxvk {
      * \returns Shader stage create info
      */
     VkPipelineShaderStageCreateInfo stageInfo(
-      const VkSpecializationInfo* specInfo) const;
+      const VkSpecializationInfo* specInfo) const {
+      VkPipelineShaderStageCreateInfo stage = m_stage;
+      stage.pSpecializationInfo = specInfo;
+      return stage;
+    }
     
     /**
-     * \brief Shader object
-     * \returns The shader
+     * \brief Checks whether module is valid
+     * \returns \c true if module is valid
      */
-    Rc<DxvkShader> shader() const {
-      return m_shader;
-    }
-
-    /**
-     * \brief Retrieves shader key
-     * \returns Unique shader key
-     */
-    DxvkShaderKey getShaderKey() const {
-      return m_shader->getShaderKey();
+    operator bool () const {
+      return m_stage.module != VK_NULL_HANDLE;
     }
     
   private:
     
-    Rc<vk::DeviceFn>      m_vkd;
-    Rc<DxvkShader>        m_shader;
-    VkShaderModule        m_module;
+    Rc<vk::DeviceFn>                m_vkd;
+    VkPipelineShaderStageCreateInfo m_stage;
     
   };
   

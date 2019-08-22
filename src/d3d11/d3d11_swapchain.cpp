@@ -34,12 +34,6 @@ namespace dxvk {
     InitRenderState();
     InitSamplers();
     InitShaders();
-
-    SetGammaControl(0, nullptr);
-
-    // The present fence seems to introduce stutter on ANV
-    if (m_device->adapter()->matchesDriver(DxvkGpuVendor::Intel, VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA_KHR, 0, 0))
-      m_usePresentFence = false;
   }
 
 
@@ -135,30 +129,33 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D11SwapChain::SetGammaControl(
           UINT                      NumControlPoints,
     const DXGI_RGB*                 pControlPoints) {
-    if (NumControlPoints > 0) {
+    bool isIdentity = true;
+
+    if (NumControlPoints > 1) {
       std::array<D3D11_VK_GAMMA_CP, 1025> cp;
 
       if (NumControlPoints > cp.size())
         return E_INVALIDARG;
       
       for (uint32_t i = 0; i < NumControlPoints; i++) {
+        uint16_t identity = MapGammaControlPoint(float(i) / float(NumControlPoints - 1));
+
         cp[i].R = MapGammaControlPoint(pControlPoints[i].Red);
         cp[i].G = MapGammaControlPoint(pControlPoints[i].Green);
         cp[i].B = MapGammaControlPoint(pControlPoints[i].Blue);
         cp[i].A = 0;
+
+        isIdentity &= cp[i].R == identity
+                   && cp[i].G == identity
+                   && cp[i].B == identity;
       }
 
-      CreateGammaTexture(NumControlPoints, cp.data());
-    } else {
-      std::array<D3D11_VK_GAMMA_CP, 256> cp;
-
-      for (uint32_t i = 0; i < cp.size(); i++) {
-        const uint16_t value = 257 * i;
-        cp[i] = { value, value, value, 0 };
-      }
-
-      CreateGammaTexture(cp.size(), cp.data());
+      if (!isIdentity)
+        CreateGammaTexture(NumControlPoints, cp.data());
     }
+
+    if (isIdentity)
+      DestroyGammaTexture();
 
     return S_OK;
   }
@@ -197,31 +194,38 @@ namespace dxvk {
 
 
   void D3D11SwapChain::PresentImage(UINT SyncInterval) {
-    // Wait for the sync event so that we
-    // respect the maximum frame latency
-    Rc<DxvkEvent> syncEvent = m_dxgiDevice->GetFrameSyncEvent();
+    // Wait for the sync event so that we respect the maximum frame latency
+    auto syncEvent = m_dxgiDevice->GetFrameSyncEvent(m_desc.BufferCount);
     syncEvent->wait();
     
     if (m_hud != nullptr)
       m_hud->update();
 
     for (uint32_t i = 0; i < SyncInterval || i < 1; i++) {
+      SynchronizePresent();
+
       m_context->beginRecording(
         m_device->createCommandList());
       
       // Resolve back buffer if it is multisampled. We
       // only have to do it only for the first frame.
       if (m_swapImageResolve != nullptr && i == 0) {
-        VkImageSubresourceLayers resolveSubresources;
-        resolveSubresources.aspectMask      = VK_IMAGE_ASPECT_COLOR_BIT;
-        resolveSubresources.mipLevel        = 0;
-        resolveSubresources.baseArrayLayer  = 0;
-        resolveSubresources.layerCount      = 1;
+        VkImageSubresourceLayers resolveSubresource;
+        resolveSubresource.aspectMask      = VK_IMAGE_ASPECT_COLOR_BIT;
+        resolveSubresource.mipLevel        = 0;
+        resolveSubresource.baseArrayLayer  = 0;
+        resolveSubresource.layerCount      = 1;
+
+        VkImageResolve resolveRegion;
+        resolveRegion.srcSubresource = resolveSubresource;
+        resolveRegion.srcOffset      = VkOffset3D { 0, 0, 0 };
+        resolveRegion.dstSubresource = resolveSubresource;
+        resolveRegion.dstOffset      = VkOffset3D { 0, 0, 0 };
+        resolveRegion.extent         = m_swapImage->info().extent;
         
         m_context->resolveImage(
-          m_swapImageResolve, resolveSubresources,
-          m_swapImage,        resolveSubresources,
-          VK_FORMAT_UNDEFINED);
+          m_swapImageResolve, m_swapImage,
+          resolveRegion, VK_FORMAT_UNDEFINED);
       }
       
       // Presentation semaphores and WSI swap chain image
@@ -231,7 +235,7 @@ namespace dxvk {
       uint32_t imageIndex = 0;
 
       VkResult status = m_presenter->acquireNextImage(
-        sync.acquire, sync.fence, imageIndex);
+        sync.acquire, VK_NULL_HANDLE, imageIndex);
 
       while (status != VK_SUCCESS && status != VK_SUBOPTIMAL_KHR) {
         RecreateSwapChain(m_vsync);
@@ -240,12 +244,8 @@ namespace dxvk {
         sync = m_presenter->getSyncSemaphores();
 
         status = m_presenter->acquireNextImage(
-          sync.acquire, sync.fence, imageIndex);
+          sync.acquire, VK_NULL_HANDLE, imageIndex);
       }
-
-      // Wait for image to become actually available
-      if (m_usePresentFence)
-        m_presenter->waitForFence(sync.fence);
 
       // Use an appropriate texture filter depending on whether
       // the back buffer size matches the swap image size
@@ -285,41 +285,51 @@ namespace dxvk {
       m_context->setInputAssemblyState(m_iaState);
       m_context->setInputLayout(0, nullptr, 0, nullptr);
 
-      m_context->bindResourceSampler(BindingIds::Sampler, fitSize ? m_samplerFitting : m_samplerScaling);
-      m_context->bindResourceSampler(BindingIds::GammaSmp, m_gammaSampler);
+      m_context->bindResourceSampler(BindingIds::Image, fitSize ? m_samplerFitting : m_samplerScaling);
+      m_context->bindResourceSampler(BindingIds::Gamma, m_gammaSampler);
 
-      m_context->bindResourceView(BindingIds::Texture, m_swapImageView, nullptr);
-      m_context->bindResourceView(BindingIds::GammaTex, m_gammaTextureView, nullptr);
+      m_context->bindResourceView(BindingIds::Image, m_swapImageView, nullptr);
+      m_context->bindResourceView(BindingIds::Gamma, m_gammaTextureView, nullptr);
 
-      m_context->draw(4, 1, 0, 0);
+      m_context->draw(3, 1, 0, 0);
 
       if (m_hud != nullptr)
         m_hud->render(m_context, info.imageExtent);
       
-      if (i + 1 >= SyncInterval) {
-        DxvkEventRevision eventRev;
-        eventRev.event    = syncEvent;
-        eventRev.revision = syncEvent->reset();
-        m_context->signalEvent(eventRev);
-      }
+      if (i + 1 >= SyncInterval)
+        m_context->queueSignal(syncEvent);
 
       m_device->submitCommandList(
         m_context->endRecording(),
         sync.acquire, sync.present);
       
-      status = m_device->presentImage(
-        m_presenter, sync.present);
-      
-      if (status != VK_SUCCESS)
+      m_device->presentImage(m_presenter,
+        sync.present, &m_presentStatus);
+
+      if (m_presentStatus.result != VK_NOT_READY
+       && m_presentStatus.result != VK_SUCCESS)
         RecreateSwapChain(m_vsync);
     }
   }
 
-  
+
+  void D3D11SwapChain::SynchronizePresent() {
+    // Recreate swap chain if the previous present call failed
+    VkResult status = m_device->waitForSubmission(&m_presentStatus);
+    
+    if (status != VK_SUCCESS)
+      RecreateSwapChain(m_vsync);
+  }
+
+
   void D3D11SwapChain::RecreateSwapChain(BOOL Vsync) {
+    // Ensure that we can safely destroy the swap chain
+    m_device->waitForSubmission(&m_presentStatus);
+    m_presentStatus.result = VK_SUCCESS;
+
     vk::PresenterDesc presenterDesc;
     presenterDesc.imageExtent     = { m_desc.Width, m_desc.Height };
-    presenterDesc.imageCount      = PickImageCount(m_desc.BufferCount);
+    presenterDesc.imageCount      = PickImageCount(m_desc.BufferCount + 1);
     presenterDesc.numFormats      = PickFormats(m_desc.Format, presenterDesc.formats);
     presenterDesc.numPresentModes = PickPresentModes(Vsync, presenterDesc.presentModes);
 
@@ -331,7 +341,7 @@ namespace dxvk {
 
 
   void D3D11SwapChain::CreatePresenter() {
-    DxvkDeviceQueue graphicsQueue = m_device->graphicsQueue();
+    DxvkDeviceQueue graphicsQueue = m_device->queues().graphics;
 
     vk::PresenterDevice presenterDevice;
     presenterDevice.queueFamily   = graphicsQueue.queueFamily;
@@ -340,7 +350,7 @@ namespace dxvk {
 
     vk::PresenterDesc presenterDesc;
     presenterDesc.imageExtent     = { m_desc.Width, m_desc.Height };
-    presenterDesc.imageCount      = PickImageCount(m_desc.BufferCount);
+    presenterDesc.imageCount      = PickImageCount(m_desc.BufferCount + 1);
     presenterDesc.numFormats      = PickFormats(m_desc.Format, presenterDesc.formats);
     presenterDesc.numPresentModes = PickPresentModes(false, presenterDesc.presentModes);
 
@@ -570,6 +580,12 @@ namespace dxvk {
   }
 
 
+  void D3D11SwapChain::DestroyGammaTexture() {
+    m_gammaTexture     = nullptr;
+    m_gammaTextureView = nullptr;
+  }
+
+
   void D3D11SwapChain::CreateHud() {
     m_hud = hud::Hud::createHud(m_device);
   }
@@ -589,7 +605,6 @@ namespace dxvk {
     
     m_msState.sampleMask            = 0xffffffff;
     m_msState.enableAlphaToCoverage = VK_FALSE;
-    m_msState.enableAlphaToOne      = VK_FALSE;
     
     VkStencilOpState stencilOp;
     stencilOp.failOp      = VK_STENCIL_OP_KEEP;
@@ -609,7 +624,7 @@ namespace dxvk {
     
     m_loState.enableLogicOp = VK_FALSE;
     m_loState.logicOp       = VK_LOGIC_OP_NO_OP;
-    
+
     m_blendMode.enableBlending  = VK_FALSE;
     m_blendMode.colorSrcFactor  = VK_BLEND_FACTOR_ONE;
     m_blendMode.colorDstFactor  = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -658,11 +673,9 @@ namespace dxvk {
     const SpirvCodeBuffer vsCode(dxgi_presenter_vert);
     const SpirvCodeBuffer fsCode(dxgi_presenter_frag);
     
-    const std::array<DxvkResourceSlot, 4> fsResourceSlots = {{
-      { BindingIds::Sampler,  VK_DESCRIPTOR_TYPE_SAMPLER,        VK_IMAGE_VIEW_TYPE_MAX_ENUM },
-      { BindingIds::Texture,  VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  VK_IMAGE_VIEW_TYPE_2D       },
-      { BindingIds::GammaSmp, VK_DESCRIPTOR_TYPE_SAMPLER,        VK_IMAGE_VIEW_TYPE_MAX_ENUM },
-      { BindingIds::GammaTex, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  VK_IMAGE_VIEW_TYPE_1D       },
+    const std::array<DxvkResourceSlot, 2> fsResourceSlots = {{
+      { BindingIds::Image, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_IMAGE_VIEW_TYPE_2D },
+      { BindingIds::Gamma, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_IMAGE_VIEW_TYPE_1D },
     }};
 
     m_vertShader = m_device->createShader(

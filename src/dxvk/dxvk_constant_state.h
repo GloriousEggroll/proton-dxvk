@@ -51,6 +51,30 @@ namespace dxvk {
           || depthBiasClamp    != other.depthBiasClamp;
     }
   };
+
+
+  /**
+   * \brief Depth bounds
+   * 
+   * Stores depth bounds values.
+   */
+  struct DxvkDepthBounds {
+    VkBool32            enableDepthBounds;
+    float               minDepthBounds;
+    float               maxDepthBounds;
+
+    bool operator == (const DxvkDepthBounds& other) const {
+      return enableDepthBounds == other.enableDepthBounds
+          && minDepthBounds == other.minDepthBounds
+          && maxDepthBounds == other.maxDepthBounds;
+    }
+
+    bool operator != (const DxvkDepthBounds& other) const {
+      return enableDepthBounds != other.enableDepthBounds
+          || minDepthBounds != other.minDepthBounds
+          || maxDepthBounds != other.maxDepthBounds;
+    }
+  };
   
   
   /**
@@ -92,7 +116,6 @@ namespace dxvk {
   struct DxvkMultisampleState {
     uint32_t            sampleMask;
     VkBool32            enableAlphaToCoverage;
-    VkBool32            enableAlphaToOne;
   };
   
   

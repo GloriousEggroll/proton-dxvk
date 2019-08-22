@@ -61,6 +61,10 @@ namespace dxvk {
             ID3D11Resource*             pResource,
             UINT                        Subresource);
     
+    void STDMETHODCALLTYPE SwapDeviceContextState(
+           ID3DDeviceContextState*           pState,
+           ID3DDeviceContextState**          ppPreviousState);
+
   private:
     
     const UINT m_contextFlags;
@@ -85,15 +89,6 @@ namespace dxvk {
             D3D11_MAP                     MapType,
             UINT                          MapFlags,
             D3D11DeferredContextMapEntry* pMapEntry);
-    
-    void UnmapBuffer(
-            ID3D11Resource*               pResource,
-      const D3D11DeferredContextMapEntry* pMapEntry);
-    
-    void UnmapImage(
-            ID3D11Resource*               pResource,
-            UINT                          Subresource,
-      const D3D11DeferredContextMapEntry* pMapEntry);
     
     Com<D3D11CommandList> CreateCommandList();
     

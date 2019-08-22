@@ -143,17 +143,33 @@ namespace dxvk {
             uint32_t                y,
             uint32_t                z,
             uint32_t                w);
-    
+
+    uint32_t constvec2f32(
+            float                   x,
+            float                   y);
+
+    uint32_t constvec3f32(
+            float                   x,
+            float                   y,
+            float                   z);
+
     uint32_t constvec4f32(
             float                   x,
             float                   y,
             float                   z,
             float                   w);
+
+    uint32_t constfReplicant(
+            float                   replicant,
+            uint32_t                count);
     
     uint32_t constComposite(
             uint32_t                typeId,
             uint32_t                constCount,
       const uint32_t*               constIds);
+    
+    uint32_t constUndef(
+            uint32_t                typeId);
     
     uint32_t specConstBool(
             bool                    v);
@@ -212,6 +228,16 @@ namespace dxvk {
             uint32_t                structId,
             uint32_t                memberId,
             spv::BuiltIn            builtIn);
+
+    void memberDecorate(
+            uint32_t                structId,
+            uint32_t                memberId,
+            spv::Decoration         decoration);
+
+    void memberDecorateMatrixStride(
+            uint32_t                structId,
+            uint32_t                memberId,
+            uint32_t                stride);
     
     void memberDecorateOffset(
             uint32_t                structId,
@@ -301,7 +327,7 @@ namespace dxvk {
             uint32_t                parameterType);
     
     void functionEnd();
-    
+
     uint32_t opAccessChain(
             uint32_t                resultType,
             uint32_t                composite,
@@ -586,6 +612,17 @@ namespace dxvk {
     uint32_t opFAbs(
             uint32_t                resultType,
             uint32_t                operand);
+
+    uint32_t opFMix(
+            uint32_t                resultType,
+            uint32_t                x,
+            uint32_t                y,
+            uint32_t                a);
+
+  uint32_t opCross(
+            uint32_t                resultType,
+            uint32_t                x,
+            uint32_t                y);
     
     uint32_t opIAdd(
             uint32_t                resultType,
@@ -641,6 +678,34 @@ namespace dxvk {
             uint32_t                resultType,
             uint32_t                a,
             uint32_t                b);
+
+    uint32_t opVectorTimesScalar(
+            uint32_t                resultType,
+            uint32_t                vector,
+            uint32_t                scalar);
+
+    uint32_t opMatrixTimesMatrix(
+            uint32_t                resultType,
+            uint32_t                a,
+            uint32_t                b);
+
+    uint32_t opMatrixTimesVector(
+            uint32_t                resultType,
+            uint32_t                matrix,
+            uint32_t                vector);
+
+    uint32_t opVectorTimesMatrix(
+            uint32_t                resultType,
+            uint32_t                vector,
+            uint32_t                matrix);
+
+    uint32_t opTranspose(
+            uint32_t                resultType,
+            uint32_t                matrix);
+
+    uint32_t opInverse(
+            uint32_t                resultType,
+            uint32_t                matrix);
     
     uint32_t opFFma(
             uint32_t                resultType,
@@ -824,6 +889,14 @@ namespace dxvk {
     uint32_t opInverseSqrt(
             uint32_t                resultType,
             uint32_t                operand);
+
+    uint32_t opNormalize(
+            uint32_t                resultType,
+            uint32_t                operand);
+
+    uint32_t opLength(
+            uint32_t                resultType,
+            uint32_t                operand);
     
     uint32_t opExp2(
             uint32_t                resultType,
@@ -832,6 +905,11 @@ namespace dxvk {
     uint32_t opLog2(
             uint32_t                resultType,
             uint32_t                operand);
+
+    uint32_t opPow(
+            uint32_t                resultType,
+            uint32_t                base,
+            uint32_t                exponent);
     
     uint32_t opFract(
             uint32_t                resultType,
@@ -982,6 +1060,18 @@ namespace dxvk {
             uint32_t                sampledImage,
             uint32_t                coordinates,
       const SpirvImageOperands&     operands);
+
+    uint32_t opImageSampleProjImplicitLod(
+            uint32_t                resultType,
+            uint32_t                sampledImage,
+            uint32_t                coordinates,
+      const SpirvImageOperands&     operands);
+
+    uint32_t opImageSampleProjExplicitLod(
+            uint32_t                resultType,
+            uint32_t                sampledImage,
+            uint32_t                coordinates,
+      const SpirvImageOperands&     operands);
     
     uint32_t opImageSampleDrefImplicitLod(
             uint32_t                resultType,
@@ -991,6 +1081,28 @@ namespace dxvk {
       const SpirvImageOperands&     operands);
     
     uint32_t opImageSampleDrefExplicitLod(
+            uint32_t                resultType,
+            uint32_t                sampledImage,
+            uint32_t                coordinates,
+            uint32_t                reference,
+      const SpirvImageOperands&     operands);
+
+    uint32_t opImageSampleProjDrefImplicitLod(
+            uint32_t                resultType,
+            uint32_t                sampledImage,
+            uint32_t                coordinates,
+            uint32_t                reference,
+      const SpirvImageOperands&     operands);
+
+    uint32_t opImageSampleProjDrefExplicitLod(
+            uint32_t                resultType,
+            uint32_t                sampledImage,
+            uint32_t                coordinates,
+            uint32_t                reference,
+      const SpirvImageOperands&     operands);
+
+    uint32_t sampleGeneric(
+            bool                    projected,
             uint32_t                resultType,
             uint32_t                sampledImage,
             uint32_t                coordinates,
@@ -1008,12 +1120,14 @@ namespace dxvk {
             uint32_t                operation,
             uint32_t                ballot);
     
-    uint32_t opGroupNonUniformLogicalAnd(
+    uint32_t opGroupNonUniformElect(
+            uint32_t                resultType,
+            uint32_t                execution);
+    
+    uint32_t opGroupNonUniformBroadcastFirst(
             uint32_t                resultType,
             uint32_t                execution,
-            uint32_t                operation,
-            uint32_t                value,
-            uint32_t                clusterSize);
+            uint32_t                value);
     
     void opControlBarrier(
             uint32_t                execution,
@@ -1055,6 +1169,8 @@ namespace dxvk {
     void opReturn();
     
     void opKill();
+
+    void opDemoteToHelperInvocation();
     
     void opEmitVertex(
             uint32_t                streamId);

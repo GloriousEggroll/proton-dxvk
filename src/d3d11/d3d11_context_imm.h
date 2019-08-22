@@ -3,6 +3,7 @@
 #include <chrono>
 
 #include "d3d11_context.h"
+#include "d3d11_state_object.h"
 
 namespace dxvk {
   
@@ -25,14 +26,13 @@ namespace dxvk {
     
     UINT STDMETHODCALLTYPE GetContextFlags();
     
-    void STDMETHODCALLTYPE End(
-            ID3D11Asynchronous*               pAsync);
-
     HRESULT STDMETHODCALLTYPE GetData(
             ID3D11Asynchronous*               pAsync,
             void*                             pData,
             UINT                              DataSize,
             UINT                              GetDataFlags);
+    
+    void STDMETHODCALLTYPE End(ID3D11Asynchronous *pAsync);
     
     void STDMETHODCALLTYPE Flush();
     
@@ -54,35 +54,7 @@ namespace dxvk {
     void STDMETHODCALLTYPE Unmap(
             ID3D11Resource*             pResource,
             UINT                        Subresource);
-    
-    void STDMETHODCALLTYPE CopySubresourceRegion(
-            ID3D11Resource*                   pDstResource,
-            UINT                              DstSubresource,
-            UINT                              DstX,
-            UINT                              DstY,
-            UINT                              DstZ,
-            ID3D11Resource*                   pSrcResource,
-            UINT                              SrcSubresource,
-      const D3D11_BOX*                        pSrcBox);
-    
-    void STDMETHODCALLTYPE CopySubresourceRegion1(
-            ID3D11Resource*                   pDstResource,
-            UINT                              DstSubresource,
-            UINT                              DstX,
-            UINT                              DstY,
-            UINT                              DstZ,
-            ID3D11Resource*                   pSrcResource,
-            UINT                              SrcSubresource,
-      const D3D11_BOX*                        pSrcBox,
-            UINT                              CopyFlags);
-    
-    void STDMETHODCALLTYPE CopyResource(
-            ID3D11Resource*                   pDstResource,
-            ID3D11Resource*                   pSrcResource);
-    
-    void STDMETHODCALLTYPE GenerateMips(
-            ID3D11ShaderResourceView*         pShaderResourceView);
-    
+            
     void STDMETHODCALLTYPE UpdateSubresource(
             ID3D11Resource*                   pDstResource,
             UINT                              DstSubresource,
@@ -99,14 +71,7 @@ namespace dxvk {
             UINT                              SrcRowPitch,
             UINT                              SrcDepthPitch,
             UINT                              CopyFlags);
-    
-    void STDMETHODCALLTYPE ResolveSubresource(
-            ID3D11Resource*                   pDstResource,
-            UINT                              DstSubresource,
-            ID3D11Resource*                   pSrcResource,
-            UINT                              SrcSubresource,
-            DXGI_FORMAT                       Format);
-            
+
     void STDMETHODCALLTYPE OMSetRenderTargets(
             UINT                              NumViews,
             ID3D11RenderTargetView* const*    ppRenderTargetViews,
@@ -121,6 +86,10 @@ namespace dxvk {
             ID3D11UnorderedAccessView* const* ppUnorderedAccessViews,
       const UINT*                             pUAVInitialCounts);
     
+    void STDMETHODCALLTYPE SwapDeviceContextState(
+           ID3DDeviceContextState*           pState,
+           ID3DDeviceContextState**          ppPreviousState);
+
     void SynchronizeCsThread();
     
   private:
@@ -130,6 +99,8 @@ namespace dxvk {
 
     std::chrono::high_resolution_clock::time_point m_lastFlush
       = std::chrono::high_resolution_clock::now();
+    
+    Com<D3D11DeviceContextState> m_stateObject;
     
     HRESULT MapBuffer(
             D3D11Buffer*                pResource,

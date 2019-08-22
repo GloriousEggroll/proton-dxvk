@@ -257,7 +257,7 @@ namespace dxvk {
         }
         
         m_buffers.push_back(std::move(handle));
-        m_physSliceCount *= 2;
+        m_physSliceCount = std::min(m_physSliceCount * 2, m_physSliceMaxCount);
       }
       
       // Take the first slice from the queue
@@ -299,9 +299,10 @@ namespace dxvk {
     std::vector<DxvkBufferSliceHandle>   m_freeSlices;
     std::vector<DxvkBufferSliceHandle>   m_nextSlices;
     
-    VkDeviceSize m_physSliceLength  = 0;
-    VkDeviceSize m_physSliceStride  = 0;
-    VkDeviceSize m_physSliceCount   = 2;
+    VkDeviceSize m_physSliceLength   = 0;
+    VkDeviceSize m_physSliceStride   = 0;
+    VkDeviceSize m_physSliceCount    = 1;
+    VkDeviceSize m_physSliceMaxCount = 1;
 
     DxvkBufferHandle allocBuffer(
             VkDeviceSize          sliceCount) const;
@@ -333,6 +334,23 @@ namespace dxvk {
     explicit DxvkBufferSlice(const Rc<DxvkBuffer>& buffer)
     : DxvkBufferSlice(buffer, 0, buffer->info().size) { }
 
+    DxvkBufferSlice(const DxvkBufferSlice& ) = default;
+    DxvkBufferSlice(      DxvkBufferSlice&&) = default;
+
+    DxvkBufferSlice& operator = (const DxvkBufferSlice& other) {
+      if (m_buffer != other.m_buffer)
+        m_buffer = other.m_buffer;
+      m_offset = other.m_offset;
+      m_length = other.m_length;
+      return *this;
+    }
+
+    DxvkBufferSlice& operator = (DxvkBufferSlice&&) = default;
+
+    /**
+     * \brief Buffer slice offset and length
+     * \returns Buffer slice offset and length
+     */
     size_t offset() const { return m_offset; }
     size_t length() const { return m_length; }
 
@@ -365,7 +383,7 @@ namespace dxvk {
      * \returns The sub slice object
      */
     DxvkBufferSlice subSlice(VkDeviceSize offset, VkDeviceSize length) const {
-      return DxvkBufferSlice(m_buffer, offset, length);
+      return DxvkBufferSlice(m_buffer, m_offset + offset, length);
     }
     
     /**
@@ -434,7 +452,7 @@ namespace dxvk {
         ? m_buffer->mapPtr(m_offset + offset)
         : nullptr;
     }
-    
+
     /**
      * \brief Checks whether two slices are equal
      * 
@@ -446,6 +464,32 @@ namespace dxvk {
     bool matches(const DxvkBufferSlice& other) const {
       return this->m_buffer == other.m_buffer
           && this->m_offset == other.m_offset
+          && this->m_length == other.m_length;
+    }
+
+    /**
+     * \brief Checks whether two slices are from the same buffer
+     *
+     * This returns \c true if the two slices are taken
+     * from the same buffer, but may have different ranges.
+     * \param [in] other The slice to compare to
+     * \returns \c true if the buffer objects are the same
+     */
+    bool matchesBuffer(const DxvkBufferSlice& other) const {
+      return this->m_buffer == other.m_buffer;
+    }
+
+    /**
+     * \brief Checks whether two slices have the same range
+     * 
+     * This returns \c true if the two slices have the same
+     * offset and size, even if the buffers are different.
+     * May be useful if the buffers are know to be the same.
+     * \param [in] other The slice to compare to
+     * \returns \c true if the buffer objects are the same
+     */
+    bool matchesRange(const DxvkBufferSlice& other) const {
+      return this->m_offset == other.m_offset
           && this->m_length == other.m_length;
     }
     
@@ -519,6 +563,14 @@ namespace dxvk {
      */
     const DxvkBufferCreateInfo& bufferInfo() const {
       return m_buffer->info();
+    }
+    
+    /**
+     * \brief View format info
+     * \returns View format info
+     */
+    const DxvkFormatInfo* formatInfo() const {
+      return imageFormatInfo(m_info.format);
     }
 
     /**

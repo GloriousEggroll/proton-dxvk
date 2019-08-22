@@ -42,8 +42,9 @@ int WINAPI WinMain(HINSTANCE hInstance,
     DxbcModule module(reader);
     
     DxbcModuleInfo moduleInfo;
-    moduleInfo.options.useSubgroupOpsForEarlyDiscard = true;
-    moduleInfo.options.useRawSsbo = true;
+    moduleInfo.options.useSubgroupOpsForAtomicCounters = true;
+    moduleInfo.options.useDemoteToHelperInvocation = true;
+    moduleInfo.options.minSsboAlignment = 4;
     moduleInfo.xfb = nullptr;
 
     Rc<DxvkShader> shader = module.compile(moduleInfo, ifileName);

@@ -266,12 +266,24 @@ namespace dxvk::vk {
     VULKAN_FN(vkCmdNextSubpass);
     VULKAN_FN(vkCmdEndRenderPass);
     VULKAN_FN(vkCmdExecuteCommands);
+
+    #ifdef VK_KHR_create_renderpass2
+    VULKAN_FN(vkCreateRenderPass2KHR);
+    VULKAN_FN(vkCmdBeginRenderPass2KHR);
+    VULKAN_FN(vkCmdNextSubpass2KHR);
+    VULKAN_FN(vkCmdEndRenderPass2KHR);
+    #endif
     
     #ifdef VK_KHR_descriptor_update_template
     VULKAN_FN(vkCreateDescriptorUpdateTemplateKHR);
     VULKAN_FN(vkDestroyDescriptorUpdateTemplateKHR);
     VULKAN_FN(vkUpdateDescriptorSetWithTemplateKHR);
     VULKAN_FN(vkCmdPushDescriptorSetWithTemplateKHR);
+    #endif
+
+    #ifdef VK_KHR_draw_indirect_count
+    VULKAN_FN(vkCmdDrawIndirectCountKHR);
+    VULKAN_FN(vkCmdDrawIndexedIndirectCountKHR);
     #endif
     
     #ifdef VK_KHR_swapchain
@@ -285,6 +297,15 @@ namespace dxvk::vk {
     #ifdef VK_KHR_get_memory_requirements2
     VULKAN_FN(vkGetBufferMemoryRequirements2KHR);
     VULKAN_FN(vkGetImageMemoryRequirements2KHR);
+    #endif
+
+    #ifdef VK_EXT_conditional_rendering
+    VULKAN_FN(vkCmdBeginConditionalRenderingEXT);
+    VULKAN_FN(vkCmdEndConditionalRenderingEXT);
+    #endif
+    
+    #ifdef VK_EXT_host_query_reset
+    VULKAN_FN(vkResetQueryPoolEXT);
     #endif
 
     #ifdef VK_EXT_transform_feedback

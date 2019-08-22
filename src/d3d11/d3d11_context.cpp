@@ -14,6 +14,7 @@ namespace dxvk {
     const Rc<DxvkDevice>&         Device,
           DxvkCsChunkFlags        CsFlags)
   : m_parent    (pParent),
+    m_contextExt(this),
     m_annotation(this),
     m_multithread(this, false),
     m_device    (Device),
@@ -55,6 +56,11 @@ namespace dxvk {
      || riid == __uuidof(ID3D11DeviceContext)
      || riid == __uuidof(ID3D11DeviceContext1)) {
       *ppvObject = ref(this);
+      return S_OK;
+    }
+    
+    if (riid == __uuidof(ID3D11VkExtContext)) {
+      *ppvObject = ref(&m_contextExt);
       return S_OK;
     }
     
@@ -126,13 +132,6 @@ namespace dxvk {
       Logger::err("D3D11DeviceContext::DiscardView1: Not implemented");
   }
 
-
-  void STDMETHODCALLTYPE D3D11DeviceContext::SwapDeviceContextState(
-          ID3DDeviceContextState*  pState, 
-          ID3DDeviceContextState** ppPreviousState) {
-    Logger::err("D3D11DeviceContext::SwapDeviceContextState: Not implemented");
-  }
-  
 
   void STDMETHODCALLTYPE D3D11DeviceContext::GetDevice(ID3D11Device **ppDevice) {
     *ppDevice = ref(m_parent);
@@ -212,10 +211,13 @@ namespace dxvk {
     m_state.om.dsState = nullptr;
     
     for (uint32_t i = 0; i < 4; i++)
-      m_state.om.blendFactor[i] = 0.0f;
+      m_state.om.blendFactor[i] = 1.0f;
     
     m_state.om.sampleMask = D3D11_DEFAULT_SAMPLE_MASK;
     m_state.om.stencilRef = D3D11_DEFAULT_STENCIL_REFERENCE;
+
+    m_state.om.maxRtv = 0;
+    m_state.om.maxUav = 0;
     
     // Default RS state
     m_state.rs.state        = nullptr;
@@ -245,53 +247,63 @@ namespace dxvk {
   void STDMETHODCALLTYPE D3D11DeviceContext::Begin(ID3D11Asynchronous *pAsync) {
     D3D10DeviceLock lock = LockContext();
 
-    if (!pAsync)
+    if (unlikely(!pAsync))
       return;
     
-    Com<D3D11Query> queryPtr = static_cast<D3D11Query*>(pAsync);
-      
-    if (queryPtr->HasBeginEnabled()) {
-      uint32_t revision = queryPtr->Reset();
-      EmitCs([revision, queryPtr] (DxvkContext* ctx) {
-        queryPtr->Begin(ctx, revision);
-      });
-    }
+    Com<D3D11Query, false> query(static_cast<D3D11Query*>(pAsync));
+
+    EmitCs([cQuery = std::move(query)]
+    (DxvkContext* ctx) {
+      cQuery->Begin(ctx);
+    });
   }
   
   
   void STDMETHODCALLTYPE D3D11DeviceContext::End(ID3D11Asynchronous *pAsync) {
     D3D10DeviceLock lock = LockContext();
 
-    if (!pAsync)
+    if (unlikely(!pAsync))
       return;
     
-    Com<D3D11Query> queryPtr = static_cast<D3D11Query*>(pAsync);
-    
-    if (queryPtr->HasBeginEnabled()) {
-      EmitCs([queryPtr] (DxvkContext* ctx) {
-        queryPtr->End(ctx);
-      });
-    } else {
-      uint32_t revision = queryPtr->Reset();
-      EmitCs([revision, queryPtr] (DxvkContext* ctx) {
-        queryPtr->Signal(ctx, revision);
-      });
-    }
+    Com<D3D11Query, false> query(static_cast<D3D11Query*>(pAsync));
+
+    EmitCs([cQuery = std::move(query)]
+    (DxvkContext* ctx) {
+      cQuery->End(ctx);
+    });
   }
   
   
   void STDMETHODCALLTYPE D3D11DeviceContext::SetPredication(
           ID3D11Predicate*                  pPredicate,
           BOOL                              PredicateValue) {
+    D3D10DeviceLock lock = LockContext();
+
+    auto predicate = static_cast<D3D11Query*>(pPredicate);
+    m_state.pr.predicateObject = predicate;
+    m_state.pr.predicateValue  = PredicateValue;
+
     static bool s_errorShown = false;
-    
+
     if (pPredicate && !std::exchange(s_errorShown, true))
       Logger::err("D3D11DeviceContext::SetPredication: Stub");
-    
-    D3D10DeviceLock lock = LockContext();
-    
-    m_state.pr.predicateObject = static_cast<D3D11Query*>(pPredicate);
-    m_state.pr.predicateValue  = PredicateValue;
+
+    // TODO: Figure out why this breaks Watch Dogs and crashes War Thunder
+    // if (!m_device->features().extConditionalRendering.conditionalRendering)
+    //   return;
+
+    // EmitCs([
+    //   cPredicate = Com<D3D11Query, false>(predicate),
+    //   cValue     = PredicateValue
+    // ] (DxvkContext* ctx) {
+    //   DxvkBufferSlice predSlice;
+
+    //   if (cPredicate != nullptr)
+    //     predSlice = cPredicate->GetPredicate(ctx);
+      
+    //   ctx->setPredicate(predSlice,
+    //     cValue ? VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT : 0);
+    // });
   }
   
   
@@ -547,6 +559,9 @@ namespace dxvk {
             cExtent);
         }
       });
+
+      if (dstTextureInfo->CanUpdateMappedBufferEarly())
+        UpdateMappedBuffer(dstTextureInfo, dstSubresource);
     }
   }
   
@@ -597,8 +612,11 @@ namespace dxvk {
           cSrcBuffer.length());
       });
     } else {
-      const Rc<DxvkImage> dstImage = GetCommonTexture(pDstResource)->GetImage();
-      const Rc<DxvkImage> srcImage = GetCommonTexture(pSrcResource)->GetImage();
+      auto dstTexture = GetCommonTexture(pDstResource);
+      auto srcTexture = GetCommonTexture(pSrcResource);
+
+      const Rc<DxvkImage> dstImage = dstTexture->GetImage();
+      const Rc<DxvkImage> srcImage = srcTexture->GetImage();
 
       const DxvkFormatInfo* dstFormatInfo = imageFormatInfo(dstImage->info().format);
       const DxvkFormatInfo* srcFormatInfo = imageFormatInfo(srcImage->info().format);
@@ -645,6 +663,11 @@ namespace dxvk {
             cSrcImage, cSrcLayers, VkOffset3D { 0, 0, 0 },
             cExtent);
         });
+
+        if (dstTexture->CanUpdateMappedBufferEarly()) {
+          for (uint32_t j = 0; j < dstImage->info().numLayers; j++)
+            UpdateMappedBuffer(dstTexture, { dstLayers.aspectMask, i, j });
+        }
       }
     }
   }
@@ -662,9 +685,13 @@ namespace dxvk {
     if (!buf || !uav)
       return;
 
+    auto counterSlice = uav->GetCounterSlice();
+    if (!counterSlice.defined())
+      return;
+
     EmitCs([
       cDstSlice = buf->GetBufferSlice(DstAlignedByteOffset),
-      cSrcSlice = uav->GetCounterSlice()
+      cSrcSlice = std::move(counterSlice)
     ] (DxvkContext* ctx) {
       ctx->copyBuffer(
         cDstSlice.buffer(),
@@ -686,17 +713,12 @@ namespace dxvk {
     if (!rtv)
       return;
     
-    const Rc<DxvkImageView> view = rtv->GetImageView();
-    
-    VkClearValue clearValue;
-    clearValue.color.float32[0] = ColorRGBA[0];
-    clearValue.color.float32[1] = ColorRGBA[1];
-    clearValue.color.float32[2] = ColorRGBA[2];
-    clearValue.color.float32[3] = ColorRGBA[3];
+    auto view  = rtv->GetImageView();
+    auto color = ConvertColorValue(ColorRGBA, view->formatInfo());
     
     EmitCs([
-      cClearValue = clearValue,
-      cImageView  = view
+      cClearValue = color,
+      cImageView  = std::move(view)
     ] (DxvkContext* ctx) {
       ctx->clearRenderTarget(
         cImageView,
@@ -801,6 +823,7 @@ namespace dxvk {
         ctx->clearImageView(cDstView,
           VkOffset3D { 0, 0, 0 },
           cDstView->mipLevelExtent(0),
+          VK_IMAGE_ASPECT_COLOR_BIT,
           cClearValue);
       });
     }
@@ -817,6 +840,16 @@ namespace dxvk {
     if (!uav)
       return;
     
+    auto imgView = uav->GetImageView();
+    auto bufView = uav->GetBufferView();
+
+    const DxvkFormatInfo* info = nullptr;
+    if (imgView != nullptr) info = imgView->formatInfo();
+    if (bufView != nullptr) info = bufView->formatInfo();
+
+    if (!info || info->flags.any(DxvkFormatFlag::SampledSInt, DxvkFormatFlag::SampledUInt))
+      return;
+    
     VkClearValue clearValue;
     clearValue.color.float32[0] = Values[0];
     clearValue.color.float32[1] = Values[1];
@@ -826,7 +859,7 @@ namespace dxvk {
     if (uav->GetResourceType() == D3D11_RESOURCE_DIMENSION_BUFFER) {
       EmitCs([
         cClearValue = clearValue,
-        cDstView    = uav->GetBufferView()
+        cDstView    = std::move(bufView)
       ] (DxvkContext* ctx) {
         ctx->clearBufferView(
           cDstView, 0,
@@ -836,11 +869,12 @@ namespace dxvk {
     } else {
       EmitCs([
         cClearValue = clearValue,
-        cDstView    = uav->GetImageView()
+        cDstView    = std::move(imgView)
       ] (DxvkContext* ctx) {
         ctx->clearImageView(cDstView,
           VkOffset3D { 0, 0, 0 },
           cDstView->mipLevelExtent(0),
+          VK_IMAGE_ASPECT_COLOR_BIT,
           cClearValue);
       });
     }
@@ -859,10 +893,8 @@ namespace dxvk {
     if (!dsv)
       return;
     
-    // Figure out which aspects to clear based
-    // on the image format and the clear flags.
-    const Rc<DxvkImageView> view = dsv->GetImageView();
-    
+    // Figure out which aspects to clear based on
+    // the image view properties and clear flags.
     VkImageAspectFlags aspectMask = 0;
     
     if (ClearFlags & D3D11_CLEAR_DEPTH)
@@ -871,7 +903,10 @@ namespace dxvk {
     if (ClearFlags & D3D11_CLEAR_STENCIL)
       aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
     
-    aspectMask &= imageFormatInfo(view->info().format)->aspectMask;
+    aspectMask &= dsv->GetWritableAspectMask();
+
+    if (!aspectMask)
+      return;
     
     VkClearValue clearValue;
     clearValue.depthStencil.depth   = Depth;
@@ -880,7 +915,7 @@ namespace dxvk {
     EmitCs([
       cClearValue = clearValue,
       cAspectMask = aspectMask,
-      cImageView  = view
+      cImageView  = dsv->GetImageView()
     ] (DxvkContext* ctx) {
       ctx->clearRenderTarget(
         cImageView,
@@ -943,21 +978,8 @@ namespace dxvk {
     // Convert the clear color format. ClearView takes
     // the clear value for integer formats as a set of
     // integral floats, so we'll have to convert.
-    VkClearValue clearValue;
-
-    if (imgView == nullptr || imgView->info().aspect & VK_IMAGE_ASPECT_COLOR_BIT) {
-      for (uint32_t i = 0; i < 4; i++) {
-        if (formatInfo->flags.test(DxvkFormatFlag::SampledUInt))
-          clearValue.color.uint32[i] = uint32_t(Color[i]);
-        else if (formatInfo->flags.test(DxvkFormatFlag::SampledSInt))
-          clearValue.color.int32[i] = int32_t(Color[i]);
-        else
-          clearValue.color.float32[i] = Color[i];
-      }
-    } else {
-      clearValue.depthStencil.depth   = Color[0];
-      clearValue.depthStencil.stencil = 0;
-    }
+    VkClearValue        clearValue  = ConvertColorValue(Color, formatInfo);
+    VkImageAspectFlags  clearAspect = formatInfo->aspectMask & (VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT);
 
     // Clear all the rectangles that are specified
     for (uint32_t i = 0; i < NumRects; i++) {
@@ -993,12 +1015,14 @@ namespace dxvk {
           cImageView    = imgView,
           cAreaOffset   = offset,
           cAreaExtent   = extent,
+          cClearAspect  = clearAspect,
           cClearValue   = clearValue
         ] (DxvkContext* ctx) {
           ctx->clearImageView(
             cImageView,
             cAreaOffset,
             cAreaExtent,
+            cClearAspect,
             cClearValue);
         });
       }
@@ -1023,13 +1047,17 @@ namespace dxvk {
       if (imgView != nullptr) {
         EmitCs([
           cImageView    = imgView,
+          cClearAspect  = clearAspect,
           cClearValue   = clearValue
         ] (DxvkContext* ctx) {
           VkOffset3D offset = { 0, 0, 0 };
           VkExtent3D extent = cImageView->mipLevelExtent(0);
 
-          ctx->clearImageView(cImageView,
-            offset, extent, cClearValue);
+          ctx->clearImageView(
+            cImageView,
+            offset, extent,
+            cClearAspect,
+            cClearValue);
         });
       }
     }
@@ -1043,7 +1071,12 @@ namespace dxvk {
 
     if (!view || view->GetResourceType() == D3D11_RESOURCE_DIMENSION_BUFFER)
       return;
-      
+
+    D3D11_COMMON_RESOURCE_DESC resourceDesc = view->GetResourceDesc();
+
+    if (!(resourceDesc.MiscFlags & D3D11_RESOURCE_MISC_GENERATE_MIPS))
+      return;
+
     EmitCs([cDstImageView = view->GetImageView()]
     (DxvkContext* ctx) {
       ctx->generateMipmaps(cDstImageView);
@@ -1077,6 +1110,9 @@ namespace dxvk {
     if (!pDstResource)
       return;
     
+    // Filter out invalid copy flags
+    CopyFlags &= D3D11_COPY_NO_OVERWRITE | D3D11_COPY_DISCARD;
+
     // We need a different code path for buffers
     D3D11_RESOURCE_DIMENSION resourceType;
     pDstResource->GetType(&resourceType);
@@ -1084,9 +1120,6 @@ namespace dxvk {
     if (resourceType == D3D11_RESOURCE_DIMENSION_BUFFER) {
       const auto bufferResource = static_cast<D3D11Buffer*>(pDstResource);
       const auto bufferSlice = bufferResource->GetBufferSlice();
-
-      if (CopyFlags & D3D11_COPY_DISCARD)
-        DiscardBuffer(bufferResource);
       
       VkDeviceSize offset = bufferSlice.offset();
       VkDeviceSize size   = bufferSlice.length();
@@ -1096,26 +1129,25 @@ namespace dxvk {
         size   = pDstBox->right - pDstBox->left;
       }
       
-      if (offset + size > bufferSlice.length()) {
-        Logger::err(str::format(
-          "D3D11: UpdateSubresource: Buffer update range out of bounds",
-          "\n  Dst slice offset: ", bufferSlice.offset(),
-          "\n  Dst slice length: ", bufferSlice.length(),
-          "\n  Src slice offset: ", offset,
-          "\n  Src slice length: ", size));
+      if (!size || offset + size > bufferSlice.length())
         return;
-      }
+
+      bool useMap = (bufferSlice.buffer()->memFlags() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+                 && (size == bufferSlice.length() || CopyFlags);
       
-      if (size == 0)
-        return;
-      
-      if (((size == bufferSlice.length())
-       && (bufferSlice.buffer()->memFlags() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))) {
+      if (useMap) {
+        D3D11_MAP mapType = (CopyFlags & D3D11_COPY_NO_OVERWRITE)
+          ? D3D11_MAP_WRITE_NO_OVERWRITE
+          : D3D11_MAP_WRITE_DISCARD;
+
         D3D11_MAPPED_SUBRESOURCE mappedSr;
-        Map(pDstResource, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedSr);
-        std::memcpy(mappedSr.pData, pSrcData, size);
+        Map(pDstResource, 0, mapType, 0, &mappedSr);
+        std::memcpy(reinterpret_cast<char*>(mappedSr.pData) + offset, pSrcData, size);
         Unmap(pDstResource, 0);
       } else {
+        if (CopyFlags & D3D11_COPY_DISCARD)
+          DiscardBuffer(bufferResource);
+        
         DxvkDataSlice dataSlice = AllocUpdateBufferSlice(size);
         std::memcpy(dataSlice.ptr(), pSrcData, size);
         
@@ -1133,9 +1165,13 @@ namespace dxvk {
     } else {
       const D3D11CommonTexture* textureInfo = GetCommonTexture(pDstResource);
       
-      const VkImageSubresource subresource =
-        textureInfo->GetSubresourceFromIndex(
-          VK_IMAGE_ASPECT_COLOR_BIT, DstSubresource);
+      VkFormat packedFormat = m_parent->LookupPackedFormat(
+        textureInfo->Desc()->Format,
+        textureInfo->GetFormatMode()).Format;
+
+      auto formatInfo = imageFormatInfo(packedFormat);
+      auto subresource = textureInfo->GetSubresourceFromIndex(
+          formatInfo->aspectMask, DstSubresource);
       
       VkExtent3D mipExtent = textureInfo->GetImage()->mipLevelExtent(subresource.mipLevel);
 
@@ -1162,9 +1198,6 @@ namespace dxvk {
         subresource.mipLevel,
         subresource.arrayLayer, 1 };
       
-      auto formatInfo = imageFormatInfo(
-        textureInfo->GetImage()->info().format);
-      
       if (!util::isBlockAligned(offset, formatInfo->blockSize)
        || !util::isBlockAligned(offset, extent, formatInfo->blockSize, mipExtent))
         return;
@@ -1177,9 +1210,7 @@ namespace dxvk {
       
       DxvkDataSlice imageDataBuffer = AllocUpdateBufferSlice(bytesTotal);
       
-      util::packImageData(
-        reinterpret_cast<char*>(imageDataBuffer.ptr()),
-        reinterpret_cast<const char*>(pSrcData),
+      util::packImageData(imageDataBuffer.ptr(), pSrcData,
         regionExtent, formatInfo->elementSize,
         SrcRowPitch, SrcDepthPitch);
       
@@ -1190,12 +1221,24 @@ namespace dxvk {
         cDstExtent        = extent,
         cSrcData          = std::move(imageDataBuffer),
         cSrcBytesPerRow   = bytesPerRow,
-        cSrcBytesPerLayer = bytesPerLayer
+        cSrcBytesPerLayer = bytesPerLayer,
+        cPackedFormat     = packedFormat
       ] (DxvkContext* ctx) {
-        ctx->updateImage(cDstImage, cDstLayers,
-          cDstOffset, cDstExtent, cSrcData.ptr(),
-          cSrcBytesPerRow, cSrcBytesPerLayer);
+        if (cDstLayers.aspectMask != (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+          ctx->updateImage(cDstImage, cDstLayers,
+            cDstOffset, cDstExtent, cSrcData.ptr(),
+            cSrcBytesPerRow, cSrcBytesPerLayer);
+        } else {
+          ctx->updateDepthStencilImage(cDstImage, cDstLayers,
+            VkOffset2D { cDstOffset.x,     cDstOffset.y      },
+            VkExtent2D { cDstExtent.width, cDstExtent.height },
+            cSrcData.ptr(), cSrcBytesPerRow, cSrcBytesPerLayer,
+            cPackedFormat);
+        }
       });
+
+      if (textureInfo->CanUpdateMappedBufferEarly())
+        UpdateMappedBuffer(textureInfo, subresource);
     }
   }
   
@@ -1309,10 +1352,14 @@ namespace dxvk {
         cSrcSubres = srcSubresourceLayers,
         cFormat    = format
       ] (DxvkContext* ctx) {
-        ctx->resolveImage(
-          cDstImage, cDstSubres,
-          cSrcImage, cSrcSubres,
-          cFormat);
+        VkImageResolve region;
+        region.srcSubresource = cSrcSubres;
+        region.srcOffset      = VkOffset3D { 0, 0, 0 };
+        region.dstSubresource = cDstSubres;
+        region.dstOffset      = VkOffset3D { 0, 0, 0 };
+        region.extent         = cDstImage->mipLevelExtent(cDstSubres.mipLevel);
+
+        ctx->resolveImage(cDstImage, cSrcImage, region, cFormat);
       });
     }
   }
@@ -1335,7 +1382,7 @@ namespace dxvk {
     EmitCs([=] (DxvkContext* ctx) {
       ctx->drawIndirectXfb(ctrBuf,
         vtxBuf.buffer()->getXfbVertexStride(),
-        0); // FIXME offset?
+        vtxBuf.offset());
     });
   }
   
@@ -1408,8 +1455,7 @@ namespace dxvk {
           ID3D11Buffer*   pBufferForArgs,
           UINT            AlignedByteOffsetForArgs) {
     D3D10DeviceLock lock = LockContext();
-    
-    SetDrawBuffer(pBufferForArgs);
+    SetDrawBuffers(pBufferForArgs, nullptr);
     
     // If possible, batch up multiple indirect draw calls of
     // the same type into one single multiDrawIndirect call
@@ -1440,8 +1486,7 @@ namespace dxvk {
           ID3D11Buffer*   pBufferForArgs,
           UINT            AlignedByteOffsetForArgs) {
     D3D10DeviceLock lock = LockContext();
-    
-    SetDrawBuffer(pBufferForArgs);
+    SetDrawBuffers(pBufferForArgs, nullptr);
 
     // If possible, batch up multiple indirect draw calls of
     // the same type into one single multiDrawIndirect call
@@ -1487,8 +1532,7 @@ namespace dxvk {
           ID3D11Buffer*   pBufferForArgs,
           UINT            AlignedByteOffsetForArgs) {
     D3D10DeviceLock lock = LockContext();
-    
-    SetDrawBuffer(pBufferForArgs);
+    SetDrawBuffers(pBufferForArgs, nullptr);
     
     EmitCs([cOffset = AlignedByteOffsetForArgs]
     (DxvkContext* ctx) {
@@ -1539,12 +1583,20 @@ namespace dxvk {
     
     for (uint32_t i = 0; i < NumBuffers; i++) {
       auto newBuffer = static_cast<D3D11Buffer*>(ppVertexBuffers[i]);
-      
-      m_state.ia.vertexBuffers[StartSlot + i].buffer = newBuffer;
-      m_state.ia.vertexBuffers[StartSlot + i].offset = pOffsets[i];
-      m_state.ia.vertexBuffers[StartSlot + i].stride = pStrides[i];
-      
-      BindVertexBuffer(StartSlot + i, newBuffer, pOffsets[i], pStrides[i]);
+      bool needsUpdate = m_state.ia.vertexBuffers[StartSlot + i].buffer != newBuffer;
+
+      if (needsUpdate)
+        m_state.ia.vertexBuffers[StartSlot + i].buffer = newBuffer;
+
+      needsUpdate |= m_state.ia.vertexBuffers[StartSlot + i].offset != pOffsets[i]
+                  || m_state.ia.vertexBuffers[StartSlot + i].stride != pStrides[i];
+
+      if (needsUpdate) {
+        m_state.ia.vertexBuffers[StartSlot + i].offset = pOffsets[i];
+        m_state.ia.vertexBuffers[StartSlot + i].stride = pStrides[i];
+
+        BindVertexBuffer(StartSlot + i, newBuffer, pOffsets[i], pStrides[i]);
+      }
     }
   }
   
@@ -1556,12 +1608,20 @@ namespace dxvk {
     D3D10DeviceLock lock = LockContext();
     
     auto newBuffer = static_cast<D3D11Buffer*>(pIndexBuffer);
-    
-    m_state.ia.indexBuffer.buffer = newBuffer;
-    m_state.ia.indexBuffer.offset = Offset;
-    m_state.ia.indexBuffer.format = Format;
-    
-    BindIndexBuffer(newBuffer, Offset, Format);
+    bool needsUpdate = m_state.ia.indexBuffer.buffer != newBuffer;
+
+    if (needsUpdate)
+      m_state.ia.indexBuffer.buffer = newBuffer;
+
+    needsUpdate |= m_state.ia.indexBuffer.offset != Offset
+                || m_state.ia.indexBuffer.format != Format;
+
+    if (needsUpdate) {
+      m_state.ia.indexBuffer.offset = Offset;
+      m_state.ia.indexBuffer.format = Format;
+
+      BindIndexBuffer(newBuffer, Offset, Format);
+    }
   }
   
   
@@ -1631,9 +1691,7 @@ namespace dxvk {
     if (m_state.vs.shader != shader) {
       m_state.vs.shader = shader;
 
-      BindShader(
-        DxbcProgramType::VertexShader,
-        GetCommonShader(shader));
+      BindShader<DxbcProgramType::VertexShader>(GetCommonShader(shader));
     }
   }
   
@@ -1644,12 +1702,10 @@ namespace dxvk {
           ID3D11Buffer* const*              ppConstantBuffers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::VertexShader,
+    SetConstantBuffers<DxbcProgramType::VertexShader>(
       m_state.vs.constantBuffers,
       StartSlot, NumBuffers,
-      ppConstantBuffers,
-      nullptr, nullptr);
+      ppConstantBuffers);
   }
 
 
@@ -1661,8 +1717,7 @@ namespace dxvk {
     const UINT*                             pNumConstants) {
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::VertexShader,
+    SetConstantBuffers1<DxbcProgramType::VertexShader>(
       m_state.vs.constantBuffers,
       StartSlot, NumBuffers,
       ppConstantBuffers,
@@ -1677,8 +1732,7 @@ namespace dxvk {
           ID3D11ShaderResourceView* const*  ppShaderResourceViews) {
     D3D10DeviceLock lock = LockContext();
     
-    SetShaderResources(
-      DxbcProgramType::VertexShader,
+    SetShaderResources<DxbcProgramType::VertexShader>(
       m_state.vs.shaderResources,
       StartSlot, NumViews,
       ppShaderResourceViews);
@@ -1691,8 +1745,7 @@ namespace dxvk {
           ID3D11SamplerState* const*        ppSamplers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetSamplers(
-      DxbcProgramType::VertexShader,
+    SetSamplers<DxbcProgramType::VertexShader>(
       m_state.vs.samplers,
       StartSlot, NumSamplers,
       ppSamplers);
@@ -1780,9 +1833,7 @@ namespace dxvk {
     if (m_state.hs.shader != shader) {
       m_state.hs.shader = shader;
 
-      BindShader(
-        DxbcProgramType::HullShader,
-        GetCommonShader(shader));
+      BindShader<DxbcProgramType::HullShader>(GetCommonShader(shader));
     }
   }
   
@@ -1793,8 +1844,7 @@ namespace dxvk {
           ID3D11ShaderResourceView* const*  ppShaderResourceViews) {
     D3D10DeviceLock lock = LockContext();
     
-    SetShaderResources(
-      DxbcProgramType::HullShader,
+    SetShaderResources<DxbcProgramType::HullShader>(
       m_state.hs.shaderResources,
       StartSlot, NumViews,
       ppShaderResourceViews);
@@ -1807,12 +1857,10 @@ namespace dxvk {
           ID3D11Buffer* const*              ppConstantBuffers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::HullShader,
+    SetConstantBuffers<DxbcProgramType::HullShader>(
       m_state.hs.constantBuffers,
       StartSlot, NumBuffers,
-      ppConstantBuffers,
-      nullptr, nullptr);
+      ppConstantBuffers);
   }
 
 
@@ -1824,8 +1872,7 @@ namespace dxvk {
     const UINT*                             pNumConstants) {
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::HullShader,
+    SetConstantBuffers1<DxbcProgramType::HullShader>(
       m_state.hs.constantBuffers,
       StartSlot, NumBuffers,
       ppConstantBuffers,
@@ -1840,8 +1887,7 @@ namespace dxvk {
           ID3D11SamplerState* const*        ppSamplers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetSamplers(
-      DxbcProgramType::HullShader,
+    SetSamplers<DxbcProgramType::HullShader>(
       m_state.hs.samplers,
       StartSlot, NumSamplers,
       ppSamplers);
@@ -1929,9 +1975,7 @@ namespace dxvk {
     if (m_state.ds.shader != shader) {
       m_state.ds.shader = shader;
 
-      BindShader(
-        DxbcProgramType::DomainShader,
-        GetCommonShader(shader));
+      BindShader<DxbcProgramType::DomainShader>(GetCommonShader(shader));
     }
   }
   
@@ -1942,8 +1986,7 @@ namespace dxvk {
           ID3D11ShaderResourceView* const*  ppShaderResourceViews) {
     D3D10DeviceLock lock = LockContext();
     
-    SetShaderResources(
-      DxbcProgramType::DomainShader,
+    SetShaderResources<DxbcProgramType::DomainShader>(
       m_state.ds.shaderResources,
       StartSlot, NumViews,
       ppShaderResourceViews);
@@ -1956,12 +1999,10 @@ namespace dxvk {
           ID3D11Buffer* const*              ppConstantBuffers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::DomainShader,
+    SetConstantBuffers<DxbcProgramType::DomainShader>(
       m_state.ds.constantBuffers,
       StartSlot, NumBuffers,
-      ppConstantBuffers,
-      nullptr, nullptr);
+      ppConstantBuffers);
   }
 
 
@@ -1973,8 +2014,7 @@ namespace dxvk {
     const UINT*                             pNumConstants) {
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::DomainShader,
+    SetConstantBuffers1<DxbcProgramType::DomainShader>(
       m_state.ds.constantBuffers,
       StartSlot, NumBuffers,
       ppConstantBuffers,
@@ -1989,8 +2029,7 @@ namespace dxvk {
           ID3D11SamplerState* const*        ppSamplers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetSamplers(
-      DxbcProgramType::DomainShader,
+    SetSamplers<DxbcProgramType::DomainShader>(
       m_state.ds.samplers,
       StartSlot, NumSamplers,
       ppSamplers);
@@ -2078,9 +2117,7 @@ namespace dxvk {
     if (m_state.gs.shader != shader) {
       m_state.gs.shader = shader;
 
-      BindShader(
-        DxbcProgramType::GeometryShader,
-        GetCommonShader(shader));
+      BindShader<DxbcProgramType::GeometryShader>(GetCommonShader(shader));
     }
   }
   
@@ -2091,12 +2128,10 @@ namespace dxvk {
           ID3D11Buffer* const*              ppConstantBuffers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::GeometryShader,
+    SetConstantBuffers<DxbcProgramType::GeometryShader>(
       m_state.gs.constantBuffers,
       StartSlot, NumBuffers,
-      ppConstantBuffers,
-      nullptr, nullptr);
+      ppConstantBuffers);
   }
 
 
@@ -2108,8 +2143,7 @@ namespace dxvk {
     const UINT*                             pNumConstants) {  
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::GeometryShader,
+    SetConstantBuffers1<DxbcProgramType::GeometryShader>(
       m_state.gs.constantBuffers,
       StartSlot, NumBuffers,
       ppConstantBuffers,
@@ -2124,8 +2158,7 @@ namespace dxvk {
           ID3D11ShaderResourceView* const*  ppShaderResourceViews) {
     D3D10DeviceLock lock = LockContext();
     
-    SetShaderResources(
-      DxbcProgramType::GeometryShader,
+    SetShaderResources<DxbcProgramType::GeometryShader>(
       m_state.gs.shaderResources,
       StartSlot, NumViews,
       ppShaderResourceViews);
@@ -2138,8 +2171,7 @@ namespace dxvk {
           ID3D11SamplerState* const*        ppSamplers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetSamplers(
-      DxbcProgramType::GeometryShader,
+    SetSamplers<DxbcProgramType::GeometryShader>(
       m_state.gs.samplers,
       StartSlot, NumSamplers,
       ppSamplers);
@@ -2227,9 +2259,7 @@ namespace dxvk {
     if (m_state.ps.shader != shader) {
       m_state.ps.shader = shader;
 
-      BindShader(
-        DxbcProgramType::PixelShader,
-        GetCommonShader(shader));
+      BindShader<DxbcProgramType::PixelShader>(GetCommonShader(shader));
     }
   }
   
@@ -2240,12 +2270,10 @@ namespace dxvk {
           ID3D11Buffer* const*              ppConstantBuffers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::PixelShader,
+    SetConstantBuffers<DxbcProgramType::PixelShader>(
       m_state.ps.constantBuffers,
       StartSlot, NumBuffers,
-      ppConstantBuffers,
-      nullptr, nullptr);
+      ppConstantBuffers);
   }
 
 
@@ -2257,8 +2285,7 @@ namespace dxvk {
     const UINT*                             pNumConstants) {
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::PixelShader,
+    SetConstantBuffers1<DxbcProgramType::PixelShader>(
       m_state.ps.constantBuffers,
       StartSlot, NumBuffers,
       ppConstantBuffers,
@@ -2273,8 +2300,7 @@ namespace dxvk {
           ID3D11ShaderResourceView* const*  ppShaderResourceViews) {
     D3D10DeviceLock lock = LockContext();
     
-    SetShaderResources(
-      DxbcProgramType::PixelShader,
+    SetShaderResources<DxbcProgramType::PixelShader>(
       m_state.ps.shaderResources,
       StartSlot, NumViews,
       ppShaderResourceViews);
@@ -2287,8 +2313,7 @@ namespace dxvk {
           ID3D11SamplerState* const*        ppSamplers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetSamplers(
-      DxbcProgramType::PixelShader,
+    SetSamplers<DxbcProgramType::PixelShader>(
       m_state.ps.samplers,
       StartSlot, NumSamplers,
       ppSamplers);
@@ -2376,9 +2401,7 @@ namespace dxvk {
     if (m_state.cs.shader != shader) {
       m_state.cs.shader = shader;
 
-      BindShader(
-        DxbcProgramType::ComputeShader,
-        GetCommonShader(shader));
+      BindShader<DxbcProgramType::ComputeShader>(GetCommonShader(shader));
     }
   }
   
@@ -2389,12 +2412,10 @@ namespace dxvk {
           ID3D11Buffer* const*              ppConstantBuffers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::ComputeShader,
+    SetConstantBuffers<DxbcProgramType::ComputeShader>(
       m_state.cs.constantBuffers,
       StartSlot, NumBuffers,
-      ppConstantBuffers,
-      nullptr, nullptr);
+      ppConstantBuffers);
   }
 
 
@@ -2406,8 +2427,7 @@ namespace dxvk {
     const UINT*                             pNumConstants) {
     D3D10DeviceLock lock = LockContext();
     
-    SetConstantBuffers(
-      DxbcProgramType::ComputeShader,
+    SetConstantBuffers1<DxbcProgramType::ComputeShader>(
       m_state.cs.constantBuffers,
       StartSlot, NumBuffers,
       ppConstantBuffers,
@@ -2422,8 +2442,7 @@ namespace dxvk {
           ID3D11ShaderResourceView* const*  ppShaderResourceViews) {
     D3D10DeviceLock lock = LockContext();
     
-    SetShaderResources(
-      DxbcProgramType::ComputeShader,
+    SetShaderResources<DxbcProgramType::ComputeShader>(
       m_state.cs.shaderResources,
       StartSlot, NumViews,
       ppShaderResourceViews);
@@ -2436,8 +2455,7 @@ namespace dxvk {
           ID3D11SamplerState* const*        ppSamplers) {
     D3D10DeviceLock lock = LockContext();
     
-    SetSamplers(
-      DxbcProgramType::ComputeShader,
+    SetSamplers<DxbcProgramType::ComputeShader>(
       m_state.cs.samplers,
       StartSlot, NumSamplers,
       ppSamplers);
@@ -2451,8 +2469,7 @@ namespace dxvk {
     const UINT*                             pUAVInitialCounts) {
     D3D10DeviceLock lock = LockContext();
     
-    SetUnorderedAccessViews(
-      DxbcProgramType::ComputeShader,
+    SetUnorderedAccessViews<DxbcProgramType::ComputeShader>(
       m_state.cs.unorderedAccessViews,
       StartSlot, NumUAVs,
       ppUnorderedAccessViews,
@@ -2542,10 +2559,9 @@ namespace dxvk {
           UINT                              NumViews,
           ID3D11RenderTargetView* const*    ppRenderTargetViews,
           ID3D11DepthStencilView*           pDepthStencilView) {
-    D3D10DeviceLock lock = LockContext();
-    
-    SetRenderTargets(NumViews, ppRenderTargetViews, pDepthStencilView);
-    BindFramebuffer(false);
+    OMSetRenderTargetsAndUnorderedAccessViews(
+      NumViews, ppRenderTargetViews, pDepthStencilView,
+      NumViews, 0, nullptr, nullptr);
   }
   
   
@@ -2559,28 +2575,54 @@ namespace dxvk {
     const UINT*                             pUAVInitialCounts) {
     D3D10DeviceLock lock = LockContext();
     
-    bool isUavRendering = false;
-    
-    if (NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
-      SetRenderTargets(NumRTVs, ppRenderTargetViews, pDepthStencilView);
-    
-    if (NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS) {
-      // Check whether there actually are any UAVs bound
-      for (uint32_t i = 0; i < NumUAVs && !isUavRendering; i++)
-        isUavRendering = ppUnorderedAccessViews[i] != nullptr;
-
-      // UAVs are made available to all shader stages in
-      // the graphics pipeline even though this code may
-      // suggest that they are limited to the pixel shader.
-      SetUnorderedAccessViews(
-        DxbcProgramType::PixelShader,
-        m_state.ps.unorderedAccessViews,
-        UAVStartSlot, NumUAVs,
-        ppUnorderedAccessViews,
-        pUAVInitialCounts);
+    if (likely(NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)) {
+      // Native D3D11 does not change the render targets if
+      // the parameters passed to this method are invalid.
+      if (!ValidateRenderTargets(NumRTVs, ppRenderTargetViews, pDepthStencilView))
+        return;
+      
+      for (uint32_t i = 0; i < m_state.om.renderTargetViews.size(); i++)
+        m_state.om.renderTargetViews[i] = i < NumRTVs
+          ? static_cast<D3D11RenderTargetView*>(ppRenderTargetViews[i])
+          : nullptr;
+      
+      m_state.om.depthStencilView = static_cast<D3D11DepthStencilView*>(pDepthStencilView);
+      m_state.om.maxRtv           = NumRTVs;
     }
 
-    BindFramebuffer(isUavRendering);
+    bool spillRenderPass = false;
+
+    if (unlikely(NumUAVs || m_state.om.maxUav)) {
+      uint32_t uavSlotId = computeUavBinding       (DxbcProgramType::PixelShader, 0);
+      uint32_t ctrSlotId = computeUavCounterBinding(DxbcProgramType::PixelShader, 0);
+
+      if (likely(NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS)) {
+        uint32_t newMaxUav = NumUAVs ? UAVStartSlot + NumUAVs : 0;
+        uint32_t oldMaxUav = std::exchange(m_state.om.maxUav, newMaxUav);
+
+        for (uint32_t i = 0; i < std::max(oldMaxUav, newMaxUav); i++) {
+          D3D11UnorderedAccessView* uav = nullptr;
+          uint32_t                  ctr = ~0u;
+
+          if (i >= UAVStartSlot && i < UAVStartSlot + NumUAVs) {
+            uav = static_cast<D3D11UnorderedAccessView*>(ppUnorderedAccessViews[i - UAVStartSlot]);
+            ctr = pUAVInitialCounts ? pUAVInitialCounts[i - UAVStartSlot] : ~0u;
+          }
+
+          if (m_state.ps.unorderedAccessViews[i] != uav || ctr != ~0u) {
+            m_state.ps.unorderedAccessViews[i] = uav;
+
+            BindUnorderedAccessView(
+              uavSlotId + i, uav,
+              ctrSlotId + i, ctr);
+
+            spillRenderPass = true;
+          }
+        }
+      }
+    }
+
+    BindFramebuffer(spillRenderPass);
   }
   
   
@@ -2723,6 +2765,9 @@ namespace dxvk {
           UINT                              NumViewports,
     const D3D11_VIEWPORT*                   pViewports) {
     D3D10DeviceLock lock = LockContext();
+
+    if (NumViewports > m_state.rs.viewports.size())
+      return;
     
     bool dirty = m_state.rs.numViewports != NumViewports;
     m_state.rs.numViewports = NumViewports;
@@ -2766,7 +2811,7 @@ namespace dxvk {
         m_state.rs.scissors[i] = pRects[i];
       }
     }
-    
+
     if (m_state.rs.state != nullptr && dirty) {
       D3D11_RASTERIZER_DESC rsDesc;
       m_state.rs.state->GetDesc(&rsDesc);
@@ -2803,9 +2848,9 @@ namespace dxvk {
           pViewports[i].MaxDepth = 0.0f;
         }
       }
+    } else {
+      *pNumViewports = m_state.rs.numViewports;
     }
-    
-    *pNumViewports = m_state.rs.numViewports;
   }
   
   
@@ -2825,9 +2870,9 @@ namespace dxvk {
           pRects[i].bottom = 0;
         }
       }
+    } else {
+      *pNumRects = m_state.rs.numScissors;
     }
-    
-    *pNumRects = m_state.rs.numScissors;
   }
 
 
@@ -2914,8 +2959,12 @@ namespace dxvk {
   
   
   void D3D11DeviceContext::ApplyInputLayout() {
-    if (m_state.ia.inputLayout != nullptr) {
-      EmitCs([cInputLayout = m_state.ia.inputLayout] (DxvkContext* ctx) {
+    auto inputLayout = m_state.ia.inputLayout.prvRef();
+
+    if (likely(inputLayout != nullptr)) {
+      EmitCs([
+        cInputLayout = std::move(inputLayout)
+      ] (DxvkContext* ctx) {
         cInputLayout->BindToContext(ctx);
       });
     } else {
@@ -2927,52 +2976,31 @@ namespace dxvk {
   
   
   void D3D11DeviceContext::ApplyPrimitiveTopology() {
-    if (m_state.ia.primitiveTopology == D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED)
-      return;
-    
-    const DxvkInputAssemblyState iaState =
-      [Topology = m_state.ia.primitiveTopology] () -> DxvkInputAssemblyState {
-      if (Topology >= D3D11_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST
-       && Topology <= D3D11_PRIMITIVE_TOPOLOGY_32_CONTROL_POINT_PATCHLIST) {
-        // Tessellation patch. The number of control points per
-        // patch can be inferred from the enum value in D3D11.
-        return { VK_PRIMITIVE_TOPOLOGY_PATCH_LIST, VK_FALSE,
-          uint32_t(Topology - D3D11_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + 1) };
-      } else {
-        switch (Topology) {
-          case D3D11_PRIMITIVE_TOPOLOGY_POINTLIST:
-            return { VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_FALSE, 0 };
-          
-          case D3D11_PRIMITIVE_TOPOLOGY_LINELIST:
-            return { VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_FALSE, 0 };
-          
-          case D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP:
-            return { VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, VK_TRUE, 0 };
-          
-          case D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST:
-            return { VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE, 0 };
-            
-          case D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP:
-            return { VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_TRUE, 0 };
-          
-          case D3D11_PRIMITIVE_TOPOLOGY_LINELIST_ADJ:
-            return { VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY, VK_FALSE, 0 };
-          
-          case D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ:
-            return { VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY, VK_TRUE, 0 };
-          
-          case D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ:
-            return { VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY, VK_FALSE, 0 };
-          
-          case D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ:
-            return { VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY, VK_TRUE, 0 };
-          
-          default:
-            Logger::err(str::format("D3D11: Invalid primitive topology: ", Topology));
-            return { };
-        }
-      }
-    }();
+    D3D11_PRIMITIVE_TOPOLOGY topology = m_state.ia.primitiveTopology;
+    DxvkInputAssemblyState iaState = { };
+
+    if (topology <= D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ) {
+      static const std::array<DxvkInputAssemblyState, 14> s_iaStates = {{
+        { }, // D3D_PRIMITIVE_TOPOLOGY_UNDEFINED
+        { VK_PRIMITIVE_TOPOLOGY_POINT_LIST,     VK_FALSE, 0 },
+        { VK_PRIMITIVE_TOPOLOGY_LINE_LIST,      VK_FALSE, 0 },
+        { VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,     VK_TRUE,  0 },
+        { VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,  VK_FALSE, 0 },
+        { VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_TRUE,  0 },
+        { }, { }, { }, { }, // Random gap that exists for no reason
+        { VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY,       VK_FALSE, 0 },
+        { VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY,      VK_TRUE,  0 },
+        { VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY,   VK_FALSE, 0 },
+        { VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY,  VK_TRUE,  0 },
+      }};
+
+      iaState = s_iaStates[uint32_t(topology)];
+    } else if (topology >= D3D11_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST
+            && topology <= D3D11_PRIMITIVE_TOPOLOGY_32_CONTROL_POINT_PATCHLIST) {
+      // The number of control points per patch can be inferred from the enum value in D3D11
+      uint32_t vertexCount = uint32_t(topology - D3D11_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + 1);
+      iaState = { VK_PRIMITIVE_TOPOLOGY_PATCH_LIST, VK_FALSE, vertexCount };
+    }
     
     EmitCs([iaState] (DxvkContext* ctx) {
       ctx->setInputAssemblyState(iaState);
@@ -2981,10 +3009,13 @@ namespace dxvk {
   
   
   void D3D11DeviceContext::ApplyBlendState() {
+    auto cbState = m_state.om.cbState.prvRef();
+
+    if (unlikely(cbState == nullptr))
+      cbState = m_defaultBlendState.prvRef();
+
     EmitCs([
-      cBlendState = m_state.om.cbState != nullptr
-        ? m_state.om.cbState
-        : m_defaultBlendState,
+      cBlendState = std::move(cbState),
       cSampleMask = m_state.om.sampleMask
     ] (DxvkContext* ctx) {
       cBlendState->BindToContext(ctx, cSampleMask);
@@ -3004,10 +3035,13 @@ namespace dxvk {
   
   
   void D3D11DeviceContext::ApplyDepthStencilState() {
+    auto dsState = m_state.om.dsState.prvRef();
+
+    if (unlikely(dsState == nullptr))
+      dsState = m_defaultDepthStencilState.prvRef();
+
     EmitCs([
-      cDepthStencilState = m_state.om.dsState != nullptr
-        ? m_state.om.dsState
-        : m_defaultDepthStencilState
+      cDepthStencilState = std::move(dsState)
     ] (DxvkContext* ctx) {
       cDepthStencilState->BindToContext(ctx);
     });
@@ -3024,10 +3058,13 @@ namespace dxvk {
   
   
   void D3D11DeviceContext::ApplyRasterizerState() {
+    auto rsState = m_state.rs.state.prvRef();
+
+    if (unlikely(rsState == nullptr))
+      rsState = m_defaultRasterizerState.prvRef();
+
     EmitCs([
-      cRasterizerState = m_state.rs.state != nullptr
-        ? m_state.rs.state
-        : m_defaultRasterizerState
+      cRasterizerState = std::move(rsState)
     ] (DxvkContext* ctx) {
       cRasterizerState->BindToContext(ctx);
     });
@@ -3035,21 +3072,26 @@ namespace dxvk {
   
   
   void D3D11DeviceContext::ApplyViewportState() {
-    // We cannot set less than one viewport in Vulkan, and
-    // rendering with no active viewport is illegal anyway.
-    if (m_state.rs.numViewports == 0)
-      return;
-    
     std::array<VkViewport, D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> viewports;
     std::array<VkRect2D,   D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> scissors;
-    
+
+    // The backend can't handle a viewport count of zero,
+    // so we should at least specify one empty viewport
+    uint32_t viewportCount = m_state.rs.numViewports;
+
+    if (unlikely(!viewportCount)) {
+      viewportCount = 1;
+      viewports[0] = VkViewport();
+      scissors [0] = VkRect2D();
+    }
+
     // D3D11's coordinate system has its origin in the bottom left,
     // but the viewport coordinates are aligned to the top-left
     // corner so we can get away with flipping the viewport.
     for (uint32_t i = 0; i < m_state.rs.numViewports; i++) {
-      const D3D11_VIEWPORT& vp = m_state.rs.viewports.at(i);
+      const D3D11_VIEWPORT& vp = m_state.rs.viewports[i];
       
-      viewports.at(i) = VkViewport {
+      viewports[i] = VkViewport {
         vp.TopLeftX, vp.Height + vp.TopLeftY,
         vp.Width,   -vp.Height,
         vp.MinDepth, vp.MaxDepth,
@@ -3068,8 +3110,18 @@ namespace dxvk {
     }
     
     for (uint32_t i = 0; i < m_state.rs.numViewports; i++) {
-      if (enableScissorTest && (i < m_state.rs.numScissors)) {
-        D3D11_RECT sr = m_state.rs.scissors.at(i);
+      if (!enableScissorTest) {
+        scissors[i] = VkRect2D {
+          VkOffset2D { 0, 0 },
+          VkExtent2D {
+            D3D11_VIEWPORT_BOUNDS_MAX,
+            D3D11_VIEWPORT_BOUNDS_MAX } };
+      } else if (i >= m_state.rs.numScissors) {
+        scissors[i] = VkRect2D {
+          VkOffset2D { 0, 0 },
+          VkExtent2D { 0, 0 } };
+      } else {
+        D3D11_RECT sr = m_state.rs.scissors[i];
         
         VkOffset2D srPosA;
         srPosA.x = std::max<int32_t>(0, sr.left);
@@ -3083,18 +3135,12 @@ namespace dxvk {
         srSize.width  = uint32_t(srPosB.x - srPosA.x);
         srSize.height = uint32_t(srPosB.y - srPosA.y);
         
-        scissors.at(i) = VkRect2D { srPosA, srSize };
-      } else {
-        scissors.at(i) = VkRect2D {
-          VkOffset2D { 0, 0 },
-          VkExtent2D {
-            D3D11_VIEWPORT_BOUNDS_MAX,
-            D3D11_VIEWPORT_BOUNDS_MAX } };
+        scissors[i] = VkRect2D { srPosA, srSize };
       }
     }
     
     EmitCs([
-      cViewportCount = m_state.rs.numViewports,
+      cViewportCount = viewportCount,
       cViewports     = viewports,
       cScissors      = scissors
     ] (DxvkContext* ctx) {
@@ -3104,14 +3150,13 @@ namespace dxvk {
         cScissors.data());
     });
   }
+
   
-  
+  template<DxbcProgramType ShaderStage>
   void D3D11DeviceContext::BindShader(
-          DxbcProgramType       ShaderStage,
     const D3D11CommonShader*    pShaderModule) {
     // Bind the shader and the ICB at once
-    const uint32_t slotId = computeResourceSlotId(
-      ShaderStage, DxbcBindingType::ConstantBuffer,
+    uint32_t slotId = computeConstantBufferBinding(ShaderStage,
       D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT);
     
     EmitCs([
@@ -3142,10 +3187,10 @@ namespace dxvk {
     // so we'll just create a new one every time the render
     // target bindings are updated. Set up the attachments.
     for (UINT i = 0; i < m_state.om.renderTargetViews.size(); i++) {
-      if (m_state.om.renderTargetViews.at(i) != nullptr) {
+      if (m_state.om.renderTargetViews[i] != nullptr) {
         attachments.color[i] = {
-          m_state.om.renderTargetViews.at(i)->GetImageView(),
-          m_state.om.renderTargetViews.at(i)->GetRenderLayout() };
+          m_state.om.renderTargetViews[i]->GetImageView(),
+          m_state.om.renderTargetViews[i]->GetRenderLayout() };
       }
     }
     
@@ -3165,14 +3210,14 @@ namespace dxvk {
   }
   
   
-  void D3D11DeviceContext::BindDrawBuffer(
-          D3D11Buffer*                      pBuffer) {
+  void D3D11DeviceContext::BindDrawBuffers(
+          D3D11Buffer*                     pBufferForArgs,
+          D3D11Buffer*                     pBufferForCount) {
     EmitCs([
-      cBufferSlice = pBuffer != nullptr
-        ? pBuffer->GetBufferSlice()
-        : DxvkBufferSlice()
+      cArgBuffer = pBufferForArgs  ? pBufferForArgs->GetBufferSlice()  : DxvkBufferSlice(),
+      cCntBuffer = pBufferForCount ? pBufferForCount->GetBufferSlice() : DxvkBufferSlice()
     ] (DxvkContext* ctx) {
-      ctx->bindDrawBuffer(cBufferSlice);
+      ctx->bindDrawBuffers(cArgBuffer, cCntBuffer);
     });
   }
 
@@ -3185,7 +3230,7 @@ namespace dxvk {
     EmitCs([
       cSlotId       = Slot,
       cBufferSlice  = pBuffer != nullptr ? pBuffer->GetBufferSlice(Offset) : DxvkBufferSlice(),
-      cStride       = pBuffer != nullptr ? Stride                          : 0
+      cStride       = Stride
     ] (DxvkContext* ctx) {
       ctx->bindVertexBuffer(cSlotId, cBufferSlice, cStride);
     });
@@ -3196,17 +3241,9 @@ namespace dxvk {
           D3D11Buffer*                      pBuffer,
           UINT                              Offset,
           DXGI_FORMAT                       Format) {
-    // As in Vulkan, the index format can be either a 32-bit
-    // or 16-bit unsigned integer, no other formats are allowed.
-    VkIndexType indexType = VK_INDEX_TYPE_UINT32;
-    
-    if (pBuffer != nullptr) {
-      switch (Format) {
-        case DXGI_FORMAT_R16_UINT: indexType = VK_INDEX_TYPE_UINT16; break;
-        case DXGI_FORMAT_R32_UINT: indexType = VK_INDEX_TYPE_UINT32; break;
-        default: Logger::err(str::format("D3D11: Invalid index format: ", Format));
-      }
-    }
+    VkIndexType indexType = Format == DXGI_FORMAT_R16_UINT
+      ? VK_INDEX_TYPE_UINT16
+      : VK_INDEX_TYPE_UINT32;
     
     EmitCs([
       cBufferSlice  = pBuffer != nullptr ? pBuffer->GetBufferSlice(Offset) : DxvkBufferSlice(),
@@ -3250,14 +3287,24 @@ namespace dxvk {
 
   void D3D11DeviceContext::BindConstantBuffer(
           UINT                              Slot,
-    const D3D11ConstantBufferBinding*       pBufferBinding) {
+          D3D11Buffer*                      pBuffer) {
     EmitCs([
       cSlotId      = Slot,
-      cBufferSlice = pBufferBinding->buffer != nullptr
-        ? pBufferBinding->buffer->GetBufferSlice(
-            pBufferBinding->constantOffset * 16,
-            pBufferBinding->constantCount  * 16)
-        : DxvkBufferSlice()
+      cBufferSlice = pBuffer ? pBuffer->GetBufferSlice() : DxvkBufferSlice()
+    ] (DxvkContext* ctx) {
+      ctx->bindResourceBuffer(cSlotId, cBufferSlice);
+    });
+  }
+  
+  
+  void D3D11DeviceContext::BindConstantBuffer1(
+          UINT                              Slot,
+          D3D11Buffer*                      pBuffer,
+          UINT                              Offset,
+          UINT                              Length) {
+    EmitCs([
+      cSlotId      = Slot,
+      cBufferSlice = Length ? pBuffer->GetBufferSlice(16 * Offset, 16 * Length) : DxvkBufferSlice()
     ] (DxvkContext* ctx) {
       ctx->bindResourceBuffer(cSlotId, cBufferSlice);
     });
@@ -3336,64 +3383,114 @@ namespace dxvk {
   }
 
 
-  void D3D11DeviceContext::SetDrawBuffer(
-          ID3D11Buffer*                     pBuffer) {
-    auto buffer = static_cast<D3D11Buffer*>(pBuffer);
+  void D3D11DeviceContext::SetDrawBuffers(
+          ID3D11Buffer*                     pBufferForArgs,
+          ID3D11Buffer*                     pBufferForCount) {
+    auto argBuffer = static_cast<D3D11Buffer*>(pBufferForArgs);
+    auto cntBuffer = static_cast<D3D11Buffer*>(pBufferForCount);
 
-    if (m_state.id.argBuffer != buffer) {
-      m_state.id.argBuffer = buffer;
-      BindDrawBuffer(buffer);
+    if (m_state.id.argBuffer != argBuffer
+     || m_state.id.cntBuffer != cntBuffer) {
+      m_state.id.argBuffer = argBuffer;
+      m_state.id.cntBuffer = cntBuffer;
+
+      BindDrawBuffers(argBuffer, cntBuffer);
     }
   }
 
 
+  template<DxbcProgramType ShaderStage>
   void D3D11DeviceContext::SetConstantBuffers(
-          DxbcProgramType                   ShaderStage,
+          D3D11ConstantBufferBindings&      Bindings,
+          UINT                              StartSlot,
+          UINT                              NumBuffers,
+          ID3D11Buffer* const*              ppConstantBuffers) {
+    uint32_t slotId = computeConstantBufferBinding(ShaderStage, StartSlot);
+    
+    for (uint32_t i = 0; i < NumBuffers; i++) {
+      auto newBuffer = static_cast<D3D11Buffer*>(ppConstantBuffers[i]);
+      
+      UINT constantBound = 0;
+      
+      if (likely(newBuffer != nullptr))
+        constantBound = newBuffer->Desc()->ByteWidth / 16;
+      
+      if (Bindings[StartSlot + i].buffer         != newBuffer
+       || Bindings[StartSlot + i].constantBound  != constantBound) {
+        Bindings[StartSlot + i].buffer         = newBuffer;
+        Bindings[StartSlot + i].constantOffset = 0;
+        Bindings[StartSlot + i].constantCount  = constantBound;
+        Bindings[StartSlot + i].constantBound  = constantBound;
+        
+        BindConstantBuffer(slotId + i, newBuffer);
+      }
+    }
+  }
+  
+  
+  template<DxbcProgramType ShaderStage>
+  void D3D11DeviceContext::SetConstantBuffers1(
           D3D11ConstantBufferBindings&      Bindings,
           UINT                              StartSlot,
           UINT                              NumBuffers,
           ID3D11Buffer* const*              ppConstantBuffers,
     const UINT*                             pFirstConstant,
     const UINT*                             pNumConstants) {
-    const uint32_t slotId = computeResourceSlotId(
-      ShaderStage, DxbcBindingType::ConstantBuffer,
-      StartSlot);
+    uint32_t slotId = computeConstantBufferBinding(ShaderStage, StartSlot);
     
     for (uint32_t i = 0; i < NumBuffers; i++) {
       auto newBuffer = static_cast<D3D11Buffer*>(ppConstantBuffers[i]);
       
-      UINT constantOffset = 0;
-      UINT constantCount  = newBuffer != nullptr
-        ? newBuffer->Desc()->ByteWidth / 16
-        : 0;
-      
-      if (newBuffer != nullptr && pFirstConstant != nullptr && pNumConstants != nullptr) {
-        constantOffset = pFirstConstant[i];
-        constantCount  = pNumConstants [i];
+      UINT constantOffset;
+      UINT constantCount;
+      UINT constantBound;
+
+      if (likely(newBuffer != nullptr)) {
+        constantBound = newBuffer->Desc()->ByteWidth / 16;
+
+        if (likely(pFirstConstant && pNumConstants)) {
+          constantOffset  = pFirstConstant[i];
+          constantCount   = pNumConstants [i];
+
+          constantBound = (constantOffset + constantCount > constantBound)
+            ? constantBound - std::min(constantOffset, constantBound)
+            : constantCount;
+        } else {
+          constantOffset  = 0;
+          constantCount   = constantBound;
+        }
+      } else {
+        constantOffset  = 0;
+        constantCount   = 0;
+        constantBound   = 0;
       }
+
+      bool needsUpdate = Bindings[StartSlot + i].buffer != newBuffer;
+
+      if (needsUpdate)
+        Bindings[StartSlot + i].buffer = newBuffer;
+
+      needsUpdate |= Bindings[StartSlot + i].constantOffset != constantOffset
+                  || Bindings[StartSlot + i].constantCount  != constantCount;
       
-      if (Bindings[StartSlot + i].buffer         != newBuffer
-       || Bindings[StartSlot + i].constantOffset != constantOffset
-       || Bindings[StartSlot + i].constantCount  != constantCount) {
-        Bindings[StartSlot + i].buffer         = newBuffer;
+      if (needsUpdate) {
         Bindings[StartSlot + i].constantOffset = constantOffset;
         Bindings[StartSlot + i].constantCount  = constantCount;
+        Bindings[StartSlot + i].constantBound  = constantBound;
         
-        BindConstantBuffer(slotId + i, &Bindings[StartSlot + i]);
+        BindConstantBuffer1(slotId + i, newBuffer, constantOffset, constantBound);
       }
     }
   }
   
   
+  template<DxbcProgramType ShaderStage>
   void D3D11DeviceContext::SetSamplers(
-          DxbcProgramType                   ShaderStage,
           D3D11SamplerBindings&             Bindings,
           UINT                              StartSlot,
           UINT                              NumSamplers,
           ID3D11SamplerState* const*        ppSamplers) {
-    const uint32_t slotId = computeResourceSlotId(
-      ShaderStage, DxbcBindingType::ImageSampler,
-      StartSlot);
+    uint32_t slotId = computeSamplerBinding(ShaderStage, StartSlot);
     
     for (uint32_t i = 0; i < NumSamplers; i++) {
       auto sampler = static_cast<D3D11SamplerState*>(ppSamplers[i]);
@@ -3406,15 +3503,13 @@ namespace dxvk {
   }
   
   
+  template<DxbcProgramType ShaderStage>
   void D3D11DeviceContext::SetShaderResources(
-          DxbcProgramType                   ShaderStage,
           D3D11ShaderResourceBindings&      Bindings,
           UINT                              StartSlot,
           UINT                              NumResources,
           ID3D11ShaderResourceView* const*  ppResources) {
-    const uint32_t slotId = computeResourceSlotId(
-      ShaderStage, DxbcBindingType::ShaderResource,
-      StartSlot);
+    uint32_t slotId = computeSrvBinding(ShaderStage, StartSlot);
     
     for (uint32_t i = 0; i < NumResources; i++) {
       auto resView = static_cast<D3D11ShaderResourceView*>(ppResources[i]);
@@ -3427,20 +3522,15 @@ namespace dxvk {
   }
   
   
+  template<DxbcProgramType ShaderStage>
   void D3D11DeviceContext::SetUnorderedAccessViews(
-          DxbcProgramType                   ShaderStage,
           D3D11UnorderedAccessBindings&     Bindings,
           UINT                              StartSlot,
           UINT                              NumUAVs,
           ID3D11UnorderedAccessView* const* ppUnorderedAccessViews,
     const UINT*                             pUAVInitialCounts) {
-    const uint32_t uavSlotId = computeResourceSlotId(
-      ShaderStage, DxbcBindingType::UnorderedAccessView,
-      StartSlot);
-    
-    const uint32_t ctrSlotId = computeResourceSlotId(
-      ShaderStage, DxbcBindingType::UavCounter,
-      StartSlot);
+    uint32_t uavSlotId = computeUavBinding       (ShaderStage, StartSlot);
+    uint32_t ctrSlotId = computeUavCounterBinding(ShaderStage, StartSlot);
     
     for (uint32_t i = 0; i < NumUAVs; i++) {
       auto uav = static_cast<D3D11UnorderedAccessView*>(ppUnorderedAccessViews[i]);
@@ -3457,25 +3547,6 @@ namespace dxvk {
   }
 
 
-  void D3D11DeviceContext::SetRenderTargets(
-          UINT                              NumViews,
-          ID3D11RenderTargetView* const*    ppRenderTargetViews,
-          ID3D11DepthStencilView*           pDepthStencilView) {
-    // Native D3D11 does not change the render targets if
-    // the parameters passed to this method are invalid.
-    if (!ValidateRenderTargets(NumViews, ppRenderTargetViews, pDepthStencilView))
-      return;
-    
-    for (UINT i = 0; i < m_state.om.renderTargetViews.size(); i++) {
-      m_state.om.renderTargetViews.at(i) = i < NumViews
-        ? static_cast<D3D11RenderTargetView*>(ppRenderTargetViews[i])
-        : nullptr;
-    }
-    
-    m_state.om.depthStencilView = static_cast<D3D11DepthStencilView*>(pDepthStencilView);
-  }
-  
-  
   void D3D11DeviceContext::GetConstantBuffers(
     const D3D11ConstantBufferBindings&      Bindings,
           UINT                              StartSlot,
@@ -3497,14 +3568,14 @@ namespace dxvk {
   
   
   void D3D11DeviceContext::RestoreState() {
-    BindFramebuffer(false);
+    BindFramebuffer(m_state.om.maxUav > 0);
     
-    BindShader(DxbcProgramType::VertexShader,   GetCommonShader(m_state.vs.shader.ptr()));
-    BindShader(DxbcProgramType::HullShader,     GetCommonShader(m_state.hs.shader.ptr()));
-    BindShader(DxbcProgramType::DomainShader,   GetCommonShader(m_state.ds.shader.ptr()));
-    BindShader(DxbcProgramType::GeometryShader, GetCommonShader(m_state.gs.shader.ptr()));
-    BindShader(DxbcProgramType::PixelShader,    GetCommonShader(m_state.ps.shader.ptr()));
-    BindShader(DxbcProgramType::ComputeShader,  GetCommonShader(m_state.cs.shader.ptr()));
+    BindShader<DxbcProgramType::VertexShader>   (GetCommonShader(m_state.vs.shader.ptr()));
+    BindShader<DxbcProgramType::HullShader>     (GetCommonShader(m_state.hs.shader.ptr()));
+    BindShader<DxbcProgramType::DomainShader>   (GetCommonShader(m_state.ds.shader.ptr()));
+    BindShader<DxbcProgramType::GeometryShader> (GetCommonShader(m_state.gs.shader.ptr()));
+    BindShader<DxbcProgramType::PixelShader>    (GetCommonShader(m_state.ps.shader.ptr()));
+    BindShader<DxbcProgramType::ComputeShader>  (GetCommonShader(m_state.cs.shader.ptr()));
     
     ApplyInputLayout();
     ApplyPrimitiveTopology();
@@ -3515,8 +3586,9 @@ namespace dxvk {
     ApplyRasterizerState();
     ApplyViewportState();
 
-    BindDrawBuffer(
-      m_state.id.argBuffer.ptr());
+    BindDrawBuffers(
+      m_state.id.argBuffer.ptr(),
+      m_state.id.cntBuffer.ptr());
     
     BindIndexBuffer(
       m_state.ia.indexBuffer.buffer.ptr(),
@@ -3533,73 +3605,69 @@ namespace dxvk {
     for (uint32_t i = 0; i < m_state.so.targets.size(); i++)
       BindXfbBuffer(i, m_state.so.targets[i].buffer.ptr(), ~0u);
     
-    RestoreConstantBuffers(DxbcProgramType::VertexShader,   m_state.vs.constantBuffers);
-    RestoreConstantBuffers(DxbcProgramType::HullShader,     m_state.hs.constantBuffers);
-    RestoreConstantBuffers(DxbcProgramType::DomainShader,   m_state.ds.constantBuffers);
-    RestoreConstantBuffers(DxbcProgramType::GeometryShader, m_state.gs.constantBuffers);
-    RestoreConstantBuffers(DxbcProgramType::PixelShader,    m_state.ps.constantBuffers);
-    RestoreConstantBuffers(DxbcProgramType::ComputeShader,  m_state.cs.constantBuffers);
+    RestoreConstantBuffers<DxbcProgramType::VertexShader>   (m_state.vs.constantBuffers);
+    RestoreConstantBuffers<DxbcProgramType::HullShader>     (m_state.hs.constantBuffers);
+    RestoreConstantBuffers<DxbcProgramType::DomainShader>   (m_state.ds.constantBuffers);
+    RestoreConstantBuffers<DxbcProgramType::GeometryShader> (m_state.gs.constantBuffers);
+    RestoreConstantBuffers<DxbcProgramType::PixelShader>    (m_state.ps.constantBuffers);
+    RestoreConstantBuffers<DxbcProgramType::ComputeShader>  (m_state.cs.constantBuffers);
     
-    RestoreSamplers(DxbcProgramType::VertexShader,   m_state.vs.samplers);
-    RestoreSamplers(DxbcProgramType::HullShader,     m_state.hs.samplers);
-    RestoreSamplers(DxbcProgramType::DomainShader,   m_state.ds.samplers);
-    RestoreSamplers(DxbcProgramType::GeometryShader, m_state.gs.samplers);
-    RestoreSamplers(DxbcProgramType::PixelShader,    m_state.ps.samplers);
-    RestoreSamplers(DxbcProgramType::ComputeShader,  m_state.cs.samplers);
+    RestoreSamplers<DxbcProgramType::VertexShader>  (m_state.vs.samplers);
+    RestoreSamplers<DxbcProgramType::HullShader>    (m_state.hs.samplers);
+    RestoreSamplers<DxbcProgramType::DomainShader>  (m_state.ds.samplers);
+    RestoreSamplers<DxbcProgramType::GeometryShader>(m_state.gs.samplers);
+    RestoreSamplers<DxbcProgramType::PixelShader>   (m_state.ps.samplers);
+    RestoreSamplers<DxbcProgramType::ComputeShader> (m_state.cs.samplers);
     
-    RestoreShaderResources(DxbcProgramType::VertexShader,   m_state.vs.shaderResources);
-    RestoreShaderResources(DxbcProgramType::HullShader,     m_state.hs.shaderResources);
-    RestoreShaderResources(DxbcProgramType::DomainShader,   m_state.ds.shaderResources);
-    RestoreShaderResources(DxbcProgramType::GeometryShader, m_state.gs.shaderResources);
-    RestoreShaderResources(DxbcProgramType::PixelShader,    m_state.ps.shaderResources);
-    RestoreShaderResources(DxbcProgramType::ComputeShader,  m_state.cs.shaderResources);
+    RestoreShaderResources<DxbcProgramType::VertexShader>   (m_state.vs.shaderResources);
+    RestoreShaderResources<DxbcProgramType::HullShader>     (m_state.hs.shaderResources);
+    RestoreShaderResources<DxbcProgramType::DomainShader>   (m_state.ds.shaderResources);
+    RestoreShaderResources<DxbcProgramType::GeometryShader> (m_state.gs.shaderResources);
+    RestoreShaderResources<DxbcProgramType::PixelShader>    (m_state.ps.shaderResources);
+    RestoreShaderResources<DxbcProgramType::ComputeShader>  (m_state.cs.shaderResources);
     
-    RestoreUnorderedAccessViews(DxbcProgramType::PixelShader,   m_state.ps.unorderedAccessViews);
-    RestoreUnorderedAccessViews(DxbcProgramType::ComputeShader, m_state.cs.unorderedAccessViews);
+    RestoreUnorderedAccessViews<DxbcProgramType::PixelShader>   (m_state.ps.unorderedAccessViews);
+    RestoreUnorderedAccessViews<DxbcProgramType::ComputeShader> (m_state.cs.unorderedAccessViews);
   }
   
   
+  template<DxbcProgramType Stage>
   void D3D11DeviceContext::RestoreConstantBuffers(
-          DxbcProgramType                   Stage,
           D3D11ConstantBufferBindings&      Bindings) {
-    const uint32_t slotId = computeResourceSlotId(
-      Stage, DxbcBindingType::ConstantBuffer, 0);
+    uint32_t slotId = computeConstantBufferBinding(Stage, 0);
     
-    for (uint32_t i = 0; i < Bindings.size(); i++)
-      BindConstantBuffer(slotId + i, &Bindings[i]);
+    for (uint32_t i = 0; i < Bindings.size(); i++) {
+      BindConstantBuffer1(slotId + i, Bindings[i].buffer.ptr(),
+        Bindings[i].constantOffset, Bindings[i].constantBound);
+    }
   }
   
   
+  template<DxbcProgramType Stage>
   void D3D11DeviceContext::RestoreSamplers(
-          DxbcProgramType                   Stage,
           D3D11SamplerBindings&             Bindings) {
-    const uint32_t slotId = computeResourceSlotId(
-      Stage, DxbcBindingType::ImageSampler, 0);
+    uint32_t slotId = computeSamplerBinding(Stage, 0);
     
     for (uint32_t i = 0; i < Bindings.size(); i++)
       BindSampler(slotId + i, Bindings[i].ptr());
   }
   
   
+  template<DxbcProgramType Stage>
   void D3D11DeviceContext::RestoreShaderResources(
-          DxbcProgramType                   Stage,
           D3D11ShaderResourceBindings&      Bindings) {
-    const uint32_t slotId = computeResourceSlotId(
-      Stage, DxbcBindingType::ShaderResource, 0);
+    uint32_t slotId = computeSrvBinding(Stage, 0);
     
     for (uint32_t i = 0; i < Bindings.size(); i++)
       BindShaderResource(slotId + i, Bindings[i].ptr());
   }
   
   
+  template<DxbcProgramType Stage>
   void D3D11DeviceContext::RestoreUnorderedAccessViews(
-          DxbcProgramType                   Stage,
           D3D11UnorderedAccessBindings&     Bindings) {
-    const uint32_t uavSlotId = computeResourceSlotId(
-      Stage, DxbcBindingType::UnorderedAccessView, 0);
-    
-    const uint32_t ctrSlotId = computeResourceSlotId(
-      Stage, DxbcBindingType::UavCounter, 0);
+    uint32_t uavSlotId = computeUavBinding       (Stage, 0);
+    uint32_t ctrSlotId = computeUavCounterBinding(Stage, 0);
     
     for (uint32_t i = 0; i < Bindings.size(); i++) {
       BindUnorderedAccessView(
@@ -3607,6 +3675,44 @@ namespace dxvk {
         Bindings[i].ptr(),
         ctrSlotId + i, ~0u);
     }
+  }
+
+
+  void D3D11DeviceContext::UpdateMappedBuffer(
+    const D3D11CommonTexture*               pTexture,
+          VkImageSubresource                Subresource) {
+    UINT SubresourceIndex = D3D11CalcSubresource(
+      Subresource.mipLevel, Subresource.arrayLayer,
+      pTexture->Desc()->MipLevels);
+
+    Rc<DxvkImage>  mappedImage  = pTexture->GetImage();
+    Rc<DxvkBuffer> mappedBuffer = pTexture->GetMappedBuffer(SubresourceIndex);
+
+    VkFormat packedFormat = m_parent->LookupPackedFormat(
+      pTexture->Desc()->Format, pTexture->GetFormatMode()).Format;
+    
+    VkExtent3D levelExtent = mappedImage->mipLevelExtent(Subresource.mipLevel);
+    
+    EmitCs([
+      cImageBuffer  = std::move(mappedBuffer),
+      cImage        = std::move(mappedImage),
+      cSubresources = vk::makeSubresourceLayers(Subresource),
+      cLevelExtent  = levelExtent,
+      cPackedFormat = packedFormat
+    ] (DxvkContext* ctx) {
+      if (cSubresources.aspectMask != (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+        ctx->copyImageToBuffer(
+          cImageBuffer, 0, VkExtent2D { 0u, 0u },
+          cImage, cSubresources, VkOffset3D { 0, 0, 0 },
+          cLevelExtent);
+      } else {
+        ctx->copyDepthStencilImageToPackedBuffer(
+          cImageBuffer, 0, cImage, cSubresources,
+          VkOffset2D { 0, 0 },
+          VkExtent2D { cLevelExtent.width, cLevelExtent.height },
+          cPackedFormat);
+      }
+    });
   }
   
   
@@ -3648,6 +3754,29 @@ namespace dxvk {
   }
   
   
+  VkClearValue D3D11DeviceContext::ConvertColorValue(
+    const FLOAT                             Color[4],
+    const DxvkFormatInfo*                   pFormatInfo) {
+    VkClearValue result;
+
+    if (pFormatInfo->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
+      for (uint32_t i = 0; i < 4; i++) {
+        if (pFormatInfo->flags.test(DxvkFormatFlag::SampledUInt))
+          result.color.uint32[i] = uint32_t(std::max(0.0f, Color[i]));
+        else if (pFormatInfo->flags.test(DxvkFormatFlag::SampledSInt))
+          result.color.int32[i] = int32_t(Color[i]);
+        else
+          result.color.float32[i] = Color[i];
+      }
+    } else {
+      result.depthStencil.depth = Color[0];
+      result.depthStencil.stencil = 0;
+    }
+
+    return result;
+  }
+
+
   DxvkDataSlice D3D11DeviceContext::AllocUpdateBufferSlice(size_t Size) {
     constexpr size_t UpdateBufferSize = 16 * 1024 * 1024;
     

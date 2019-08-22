@@ -24,16 +24,16 @@ namespace dxvk::util {
   /**
    * \brief Writes tightly packed image data to a buffer
    * 
-   * \param [in] dstData Destination buffer pointer
-   * \param [in] srcData Pointer to source data
+   * \param [in] dstBytes Destination buffer pointer
+   * \param [in] srcBytes Pointer to source data
    * \param [in] blockCount Number of blocks to copy
    * \param [in] blockSize Number of bytes per block
    * \param [in] pitchPerRow Number of bytes between rows
    * \param [in] pitchPerLayer Number of bytes between layers
    */
   void packImageData(
-          char*             dstData,
-    const char*             srcData,
+          void*             dstBytes,
+    const void*             srcBytes,
           VkExtent3D        blockCount,
           VkDeviceSize      blockSize,
           VkDeviceSize      pitchPerRow,
@@ -85,6 +85,20 @@ namespace dxvk::util {
     return ((extent.width  % blockSize.width  == 0) || (uint32_t(offset.x + extent.width)  == imageSize.width))
         && ((extent.height % blockSize.height == 0) || (uint32_t(offset.y + extent.height) == imageSize.height))
         && ((extent.depth  % blockSize.depth  == 0) || (uint32_t(offset.z + extent.depth)  == imageSize.depth));
+  }
+  
+  /**
+   * \brief Computes mip level extent
+   *
+   * \param [in] size Base mip level extent
+   * \param [in] level mip level to compute
+   * \returns Extent of the given mip level
+   */
+  inline VkExtent3D computeMipLevelExtent(VkExtent3D size, uint32_t level) {
+    size.width  = std::max(1u, size.width  >> level);
+    size.height = std::max(1u, size.height >> level);
+    size.depth  = std::max(1u, size.depth  >> level);
+    return size;
   }
   
   /**
@@ -160,6 +174,17 @@ namespace dxvk::util {
   inline uint32_t flattenImageExtent(VkExtent3D extent) {
     return extent.width * extent.height * extent.depth;
   }
+
+  /**
+   * \brief Checks whether the depth aspect is read-only in a layout
+   * 
+   * \param [in] layout Image layout. Must be a valid depth-stencil attachment laoyut.
+   * \returns \c true if the depth aspect for images in this layout is read-only.
+   */
+  inline bool isDepthReadOnlyLayout(VkImageLayout layout) {
+    return layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+        || layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
+  }
   
   /**
    * \brief Computes image data size, in bytes
@@ -211,6 +236,10 @@ namespace dxvk::util {
   uint32_t getComponentIndex(
           VkComponentSwizzle          component,
           uint32_t                    identity);
+  
+  VkClearColorValue swizzleClearColor(
+          VkClearColorValue           color,
+          VkComponentMapping          mapping);
   
   bool isBlendConstantBlendFactor(
           VkBlendFactor               factor);

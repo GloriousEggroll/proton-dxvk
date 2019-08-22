@@ -84,14 +84,11 @@ namespace dxvk {
           D3D11_MAPPED_SUBRESOURCE*   pMappedResource) {
     D3D10DeviceLock lock = LockContext();
 
+    if (unlikely(!pResource || !pMappedResource))
+      return E_INVALIDARG;
+    
     D3D11_RESOURCE_DIMENSION resourceDim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
     pResource->GetType(&resourceDim);
-    
-    if (pMappedResource != nullptr) {
-      pMappedResource->pData      = nullptr;
-      pMappedResource->RowPitch   = 0;
-      pMappedResource->DepthPitch = 0;
-    }
     
     if (MapType == D3D11_MAP_WRITE_DISCARD) {
       D3D11DeferredContextMapEntry entry;
@@ -100,8 +97,10 @@ namespace dxvk {
         ? MapBuffer(pResource,              MapType, MapFlags, &entry)
         : MapImage (pResource, Subresource, MapType, MapFlags, &entry);
       
-      if (FAILED(status))
+      if (unlikely(FAILED(status))) {
+        *pMappedResource = D3D11_MAPPED_SUBRESOURCE();
         return status;
+      }
       
       // Adding a new map entry actually overrides the
       // old one in practice because the lookup function
@@ -118,8 +117,10 @@ namespace dxvk {
       // before it can be mapped with D3D11_MAP_WRITE_NO_OVERWRITE.
       auto entry = FindMapEntry(pResource, Subresource);
       
-      if (entry == m_mappedResources.rend())
+      if (unlikely(entry == m_mappedResources.rend())) {
+        *pMappedResource = D3D11_MAPPED_SUBRESOURCE();
         return E_INVALIDARG;
+      }
       
       // Return same memory region as earlier
       entry->MapType = D3D11_MAP_WRITE_NO_OVERWRITE;
@@ -130,6 +131,7 @@ namespace dxvk {
       return S_OK;
     } else {
       // Not allowed on deferred contexts
+      *pMappedResource = D3D11_MAPPED_SUBRESOURCE();
       return E_INVALIDARG;
     }
   }
@@ -138,27 +140,17 @@ namespace dxvk {
   void STDMETHODCALLTYPE D3D11DeferredContext::Unmap(
           ID3D11Resource*             pResource,
           UINT                        Subresource) {
-    D3D10DeviceLock lock = LockContext();
-
-    D3D11_RESOURCE_DIMENSION resourceDim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-    pResource->GetType(&resourceDim);
-    
-    auto entry = FindMapEntry(pResource, Subresource);
-    
-    if (entry == m_mappedResources.rend()) {
-      Logger::err("D3D11DeferredContext::Unmap: Subresource not mapped");
-      return;
-    }
-    
-    if (entry->MapType == D3D11_MAP_WRITE_DISCARD) {
-      if (resourceDim == D3D11_RESOURCE_DIMENSION_BUFFER)
-        UnmapBuffer(pResource, &(*entry));
-      else
-        UnmapImage(pResource, Subresource, &(*entry));
-    }
+    // No-op, updates are committed in Map
   }
   
   
+  void STDMETHODCALLTYPE D3D11DeferredContext::SwapDeviceContextState(
+          ID3DDeviceContextState*           pState,
+          ID3DDeviceContextState**          ppPreviousState) {
+    Logger::err("D3D11: SwapDeviceContextState called on a deferred context");
+  }
+
+
   HRESULT D3D11DeferredContext::MapBuffer(
           ID3D11Resource*               pResource,
           D3D11_MAP                     MapType,
@@ -177,17 +169,33 @@ namespace dxvk {
     pMapEntry->RowPitch     = pBuffer->Desc()->ByteWidth;
     pMapEntry->DepthPitch   = pBuffer->Desc()->ByteWidth;
     
-    if (pBuffer->Desc()->Usage == D3D11_USAGE_DYNAMIC && m_csFlags.test(DxvkCsChunkFlag::SingleUse)) {
+    if (likely(pBuffer->Desc()->Usage == D3D11_USAGE_DYNAMIC && m_csFlags.test(DxvkCsChunkFlag::SingleUse))) {
       // For resources that cannot be written by the GPU,
       // we may write to the buffer resource directly and
       // just swap in the buffer slice as needed.
       pMapEntry->BufferSlice = pBuffer->AllocSlice();
       pMapEntry->MapPointer  = pMapEntry->BufferSlice.mapPtr;
+
+      EmitCs([
+        cDstBuffer = pBuffer->GetBuffer(),
+        cPhysSlice = pMapEntry->BufferSlice
+      ] (DxvkContext* ctx) {
+        ctx->invalidateBuffer(cDstBuffer, cPhysSlice);
+      });
     } else {
       // For GPU-writable resources, we need a data slice
       // to perform the update operation at execution time.
       pMapEntry->DataSlice   = AllocUpdateBufferSlice(pBuffer->Desc()->ByteWidth);
       pMapEntry->MapPointer  = pMapEntry->DataSlice.ptr();
+
+      EmitCs([
+        cDstBuffer = pBuffer->GetBuffer(),
+        cDataSlice = pMapEntry->DataSlice
+      ] (DxvkContext* ctx) {
+        DxvkBufferSliceHandle slice = cDstBuffer->allocSlice();
+        std::memcpy(slice.mapPtr, cDataSlice.ptr(), cDataSlice.length());
+        ctx->invalidateBuffer(cDstBuffer, slice);
+      });
     }
     
     return S_OK;
@@ -203,20 +211,19 @@ namespace dxvk {
     const D3D11CommonTexture* pTexture = GetCommonTexture(pResource);
     const Rc<DxvkImage> image = pTexture->GetImage();
     
-    if (pTexture->GetMapMode() == D3D11_COMMON_TEXTURE_MAP_MODE_NONE) {
+    if (unlikely(pTexture->GetMapMode() == D3D11_COMMON_TEXTURE_MAP_MODE_NONE)) {
       Logger::err("D3D11: Cannot map a device-local image");
       return E_INVALIDARG;
     }
-    
-    auto formatInfo = imageFormatInfo(image->info().format);
-    
-    if (formatInfo->aspectMask != VK_IMAGE_ASPECT_COLOR_BIT) {
-      Logger::err("D3D11: Cannot map a depth-stencil texture");
+
+    if (unlikely(Subresource >= pTexture->CountSubresources()))
       return E_INVALIDARG;
-    }
     
-    VkImageSubresource subresource =
-      pTexture->GetSubresourceFromIndex(
+    VkFormat packedFormat = m_parent->LookupPackedFormat(
+      pTexture->Desc()->Format, pTexture->GetFormatMode()).Format;
+    
+    auto formatInfo = imageFormatInfo(packedFormat);
+    auto subresource = pTexture->GetSubresourceFromIndex(
         formatInfo->aspectMask, Subresource);
     
     VkExtent3D levelExtent = image->mipLevelExtent(subresource.mipLevel);
@@ -235,64 +242,46 @@ namespace dxvk {
     pMapEntry->DepthPitch   = ySize;
     pMapEntry->DataSlice    = AllocUpdateBufferSlice(zSize);
     pMapEntry->MapPointer   = pMapEntry->DataSlice.ptr();
-    return S_OK;
-  }
-  
-  
-  void D3D11DeferredContext::UnmapBuffer(
-          ID3D11Resource*               pResource,
-    const D3D11DeferredContextMapEntry* pMapEntry) {
-    D3D11Buffer* pBuffer = static_cast<D3D11Buffer*>(pResource);
-    
-    if (pBuffer->Desc()->Usage == D3D11_USAGE_DYNAMIC && m_csFlags.test(DxvkCsChunkFlag::SingleUse)) {
-      EmitCs([
-        cDstBuffer = pBuffer->GetBuffer(),
-        cPhysSlice = pMapEntry->BufferSlice
-      ] (DxvkContext* ctx) {
-        ctx->invalidateBuffer(cDstBuffer, cPhysSlice);
-      });
-    } else {
-      EmitCs([
-        cDstBuffer = pBuffer->GetBuffer(),
-        cDataSlice = pMapEntry->DataSlice
-      ] (DxvkContext* ctx) {
-        DxvkBufferSliceHandle slice = cDstBuffer->allocSlice();
-        std::memcpy(slice.mapPtr, cDataSlice.ptr(), cDataSlice.length());
-        ctx->invalidateBuffer(cDstBuffer, slice);
-      });
-    }
-  }
-  
-  
-  void D3D11DeferredContext::UnmapImage(
-          ID3D11Resource*               pResource,
-          UINT                          Subresource,
-    const D3D11DeferredContextMapEntry* pMapEntry) {
-    // TODO If the texture itself is mapped to host-visible
-    // memory, write the data slice directly to the image.
-    const D3D11CommonTexture* pTexture = GetCommonTexture(pResource);
-    
+
     EmitCs([
       cImage              = pTexture->GetImage(),
       cSubresource        = pTexture->GetSubresourceFromIndex(
         VK_IMAGE_ASPECT_COLOR_BIT, Subresource),
       cDataSlice          = pMapEntry->DataSlice,
       cDataPitchPerRow    = pMapEntry->RowPitch,
-      cDataPitchPerLayer  = pMapEntry->DepthPitch
+      cDataPitchPerLayer  = pMapEntry->DepthPitch,
+      cPackedFormat       = GetPackedDepthStencilFormat(pTexture->Desc()->Format)
     ] (DxvkContext* ctx) {
       VkImageSubresourceLayers srLayers;
       srLayers.aspectMask     = cSubresource.aspectMask;
       srLayers.mipLevel       = cSubresource.mipLevel;
       srLayers.baseArrayLayer = cSubresource.arrayLayer;
       srLayers.layerCount     = 1;
+
+      VkOffset3D mipLevelOffset = { 0, 0, 0 };
+      VkExtent3D mipLevelExtent = cImage->mipLevelExtent(srLayers.mipLevel);
       
-      ctx->updateImage(
-        cImage, srLayers, VkOffset3D { 0, 0, 0 },
-        cImage->mipLevelExtent(cSubresource.mipLevel),
-        cDataSlice.ptr(),
-        cDataPitchPerRow,
-        cDataPitchPerLayer);
+      if (cPackedFormat == VK_FORMAT_UNDEFINED) {
+        ctx->updateImage(
+          cImage, srLayers,
+          mipLevelOffset,
+          mipLevelExtent,
+          cDataSlice.ptr(),
+          cDataPitchPerRow,
+          cDataPitchPerLayer);
+      } else {
+        ctx->updateDepthStencilImage(
+          cImage, srLayers,
+          VkOffset2D { mipLevelOffset.x,     mipLevelOffset.y      },
+          VkExtent2D { mipLevelExtent.width, mipLevelExtent.height },
+          cDataSlice.ptr(),
+          cDataPitchPerRow,
+          cDataPitchPerLayer,
+          cPackedFormat);
+      }
     });
+
+    return S_OK;
   }
   
   

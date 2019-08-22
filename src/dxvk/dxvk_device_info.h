@@ -18,6 +18,7 @@ namespace dxvk {
     VkPhysicalDeviceSubgroupProperties                  coreSubgroup;
     VkPhysicalDeviceTransformFeedbackPropertiesEXT      extTransformFeedback;
     VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT extVertexAttributeDivisor;
+    VkPhysicalDeviceDepthStencilResolvePropertiesKHR    khrDepthStencilResolve;
     VkPhysicalDeviceDriverPropertiesKHR                 khrDeviceDriverProperties;
   };
 
@@ -30,11 +31,14 @@ namespace dxvk {
    * extended features will be marked as unsupported.
    */
   struct DxvkDeviceFeatures {
-    VkPhysicalDeviceFeatures2KHR                        core;
-    VkPhysicalDeviceDepthClipEnableFeaturesEXT          extDepthClipEnable;
-    VkPhysicalDeviceMemoryPriorityFeaturesEXT           extMemoryPriority;
-    VkPhysicalDeviceTransformFeedbackFeaturesEXT        extTransformFeedback;
-    VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT   extVertexAttributeDivisor;
+    VkPhysicalDeviceFeatures2KHR                              core;
+    VkPhysicalDeviceConditionalRenderingFeaturesEXT           extConditionalRendering;
+    VkPhysicalDeviceDepthClipEnableFeaturesEXT                extDepthClipEnable;
+    VkPhysicalDeviceHostQueryResetFeaturesEXT                 extHostQueryReset;
+    VkPhysicalDeviceMemoryPriorityFeaturesEXT                 extMemoryPriority;
+    VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT extShaderDemoteToHelperInvocation;
+    VkPhysicalDeviceTransformFeedbackFeaturesEXT              extTransformFeedback;
+    VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT         extVertexAttributeDivisor;
   };
 
 }

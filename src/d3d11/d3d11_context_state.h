@@ -19,6 +19,7 @@ namespace dxvk {
     Com<D3D11Buffer> buffer         = nullptr;
     UINT             constantOffset = 0;
     UINT             constantCount  = 0;
+    UINT             constantBound  = 0;
   };
   
   using D3D11ConstantBufferBindings = std::array<
@@ -103,6 +104,7 @@ namespace dxvk {
 
   struct D3D11ContextStateID {
     Com<D3D11Buffer> argBuffer = nullptr;
+    Com<D3D11Buffer> cntBuffer = nullptr;
   };
   
   
@@ -116,8 +118,8 @@ namespace dxvk {
   
   
   struct D3D11ContextStateOM {
-    std::array<Com<D3D11RenderTargetView>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> renderTargetViews;
-    Com<D3D11DepthStencilView>                                                     depthStencilView;
+    std::array<Com<D3D11RenderTargetView, false>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> renderTargetViews;
+    Com<D3D11DepthStencilView, false>                                                     depthStencilView;
     
     Com<D3D11BlendState>        cbState = nullptr;
     Com<D3D11DepthStencilState> dsState = nullptr;
@@ -125,6 +127,9 @@ namespace dxvk {
     FLOAT blendFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     UINT  sampleMask     = 0xFFFFFFFFu;
     UINT  stencilRef     = 0u;
+
+    UINT  maxRtv         = 0u;
+    UINT  maxUav         = 0u;
   };
   
   
